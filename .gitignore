@@ -1,0 +1,7 @@
+node_modules/
+.build/
+.DS_Store
+*.log
+# Firmware is downloaded from the AREA512 repository at run time.
+firmware/
+*.img

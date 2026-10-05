@@ -1,0 +1,1577 @@
+From 8147c20e25dae4585d93bfdefb22aa27c8c90c53 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 23:51:04 +0000
+Subject: [PATCH] Cardputer ADV board: SPI3, GP-SPI RX DMA, SD card, TCA8418,
+ spin skip
+
+---
+ cli/src/lib.rs                     |   9 +-
+ emu-core/src/core.rs               |   4 +
+ esp-periph/src/gpspi.rs            |   6 +-
+ esp-soc/src/board.rs               |  14 ++
+ esp-soc/src/devices/mod.rs         |   2 +
+ esp-soc/src/devices/sd_spi.rs      | 391 +++++++++++++++++++++++++++++
+ esp-soc/src/load.rs                |   8 +
+ esp-soc/src/machine.rs             |  61 ++++-
+ esp-soc/src/machine/web.rs         |  13 +
+ esp-soc/src/soc.rs                 |   9 +
+ esp32s3/src/board/cardputer_adv.rs | 323 ++++++++++++++++++++++++
+ esp32s3/src/board/mod.rs           |   3 +
+ esp32s3/src/bus.rs                 |  29 ++-
+ esp32s3/src/bus/dma.rs             |  77 ++++--
+ esp32s3/src/bus/pins.rs            |   6 +
+ esp32s3/src/periph.rs              |   7 +-
+ esp32s3/src/soc.rs                 |  10 +
+ wasm/src/lib.rs                    |  51 ++++
+ wasm/src/machine.rs                |   8 +
+ xtensa-lx7/src/core.rs             |   1 +
+ 20 files changed, 994 insertions(+), 38 deletions(-)
+ create mode 100644 esp-soc/src/devices/sd_spi.rs
+ create mode 100644 esp32s3/src/board/cardputer_adv.rs
+
+diff --git a/cli/src/lib.rs b/cli/src/lib.rs
+index 45b5b821..8057a894 100644
+--- a/cli/src/lib.rs
++++ b/cli/src/lib.rs
+@@ -69,7 +69,7 @@ pub struct Opts {
+     pub rom: Option<PathBuf>, pub bootloader: Option<String>, pub ptable: Option<String>, pub app: Option<String>, pub elfs: Vec<String>,
+     pub flash_image: Option<String>, pub flash_at: Vec<String>, pub boot: Option<String>, pub flash_mb: Option<usize>, pub psram_mb: Option<usize>,
+     pub mac: Option<[u8; 6]>, pub strap: Option<u32>, pub reset_cause: Option<u32>, pub efuse_regs: Option<String>, pub regs_init: Option<String>,
+-    pub board: String, pub wifi: Option<String>, pub net: String, pub cam_image: Option<String>, pub cam_fps: f64,
++    pub board: String, pub wifi: Option<String>, pub net: String, pub cam_image: Option<String>, pub cam_fps: f64, pub sd_image: Option<String>, pub sd_save: Option<String>, pub spin_skip: bool,
+     pub spi2_timing: bool, pub measured_te: bool,
+     pub max_insns: u64, pub max_seconds: Option<f64>, pub script: Option<String>, pub serial: Option<String>,
+     pub console: Option<String>, pub console_prefix: bool, pub realtime: bool, pub web_port: Option<u16>, pub web_dir: Option<String>, pub no_reboot: bool,
+@@ -115,6 +115,9 @@ pub fn parse(args: &[String], default_chip: &str) -> Opts {
+             "--wifi" => o.wifi = Some(next()),
+             "--net" => o.net = next(),
+             "--cam-image" => o.cam_image = Some(next()),
++            "--sd-image" => o.sd_image = Some(next()),
++            "--sd-save" => o.sd_save = Some(next()),
++            "--spin-skip" => o.spin_skip = true,
+             "--cam-fps" => o.cam_fps = next().parse().expect("fps"),
+             "--max-insns" => o.max_insns = next().replace('_', "").parse().expect("max-insns"),
+             "--max-seconds" => o.max_seconds = Some(next().parse().expect("seconds")),
+@@ -242,6 +245,8 @@ fn setup_s3(o: &Opts) -> esp32s3::Machine {
+         m.bus.periph.wifi.net = Some(net);
+         m.bus.refresh_tick_budget();
+     }
++    m.set_spin_skip(o.spin_skip);
++    if let Some(p) = &o.sd_image { match std::fs::read(p) { Ok(img) => { eprintln!("[emu] sd card {} ({} MiB)", p, img.len() >> 20); m.bus.board.set_sd_image(img); } Err(e) => { eprintln!("[emu] --sd-image {}: {}", p, e); std::process::exit(2); } } }
+     if let Some(p) = &o.cam_image { match esp_soc::picture::load(p) { Ok(pic) => { eprintln!("[emu] camera picture {} ({}x{})", p, pic.w, pic.h); m.bus.board.set_camera_picture(pic); } Err(e) => { eprintln!("[emu] {}", e); std::process::exit(2); } } }
+     m.bus.periph.lcd_cam.frame_cycles = (esp32s3::periph::CPU_HZ as f64 / o.cam_fps) as u64;
+     if let Some(mb) = o.flash_mb { if mb != 8 { m.bus.set_flash_size(mb << 20); } }
+@@ -454,6 +459,8 @@ fn report<S: Soc>(m: &mut Machine<S>, o: &Opts, stop: Stop, dt: f64) {
+       if m.vq_stats[0] > 0 { eprintln!("[emu] virtual quanta: runs, quanta, stopped at a device register, at waiti = {:?}", m.vq_stats); }
+       if st.iter().any(|s| s.0 > 0) { let b0 = st[0]; let b1 = st.get(1).copied().unwrap_or((0, 0, 0, 0)); eprintln!("[emu] blocks: {} built ({} cache flushes) core0, {} ({}) core1; jit: {} compiled, {} KB code", b0.0, b0.1, b1.0, b1.1, b0.2 + b1.2, (b0.3 + b1.3) / 1024); } }
+     if m.stub_hits > 0 { eprintln!("[emu] stubs hit {} times", m.stub_hits); }
++    if o.spin_skip { eprintln!("[emu] spin skip: {} parks", m.spin_parks); }
++    if let Some(p) = &o.sd_save { if let Some(img) = m.bus.board_ref().sd_image() { match std::fs::write(p, img) { Ok(()) => eprintln!("[emu] wrote {}", p), Err(e) => eprintln!("[emu] --sd-save: {}", e) } } }
+     if let Some(p) = &o.tft_png { match m.write_tft_png(p, 3) { Ok(()) => eprintln!("[emu] wrote {}", p), Err(e) => eprintln!("[emu] png: {}", e) } }
+     if let Some(p) = &o.gram_png { match m.write_gram_png(p) { Ok(()) => eprintln!("[emu] wrote {}", p), Err(e) => eprintln!("[emu] png: {}", e) } }
+     if o.dump { eprintln!("{}", m.dump_regs()); }
+diff --git a/emu-core/src/core.rs b/emu-core/src/core.rs
+index 8e631786..d38a0630 100644
+--- a/emu-core/src/core.rs
++++ b/emu-core/src/core.rs
+@@ -101,6 +101,10 @@ pub trait Core {
+     fn set_pc(&mut self, pc: u32);
+     /// Halted by `waiti`/`wfi` until an interrupt arrives.
+     fn waiting(&self) -> bool;
++    /// Halt as `waiti` does, without changing the interrupt level: the core resumes at its
++    /// current PC when an interrupt is taken. Used to park a core that is spinning on
++    /// self-yields (see `Machine::set_spin_skip`). Cores that cannot park ignore it.
++    fn park(&mut self) {}
+     fn insn_count(&self) -> u64;
+     /// Present the SoC's interrupt state. Called after the machine re-derives it; must be cheap.
+     fn set_irq(&mut self, irq: Self::Irq);
+diff --git a/esp-periph/src/gpspi.rs b/esp-periph/src/gpspi.rs
+index baf9b68b..8b247c46 100644
+--- a/esp-periph/src/gpspi.rs
++++ b/esp-periph/src/gpspi.rs
+@@ -6,6 +6,9 @@ use crate::regram::RegRam;
+ pub struct GpSpiTransfer {
+     pub tx: Vec<u8>,
+     pub rx_len: usize,
++    /// `DMA_CONF.DMA_RX_ENA`: the MISO bytes go to the GDMA IN channel bound to this host, not
++    /// only to W0..W15.
++    pub rx_dma: bool,
+     data_len: usize,
+     rx_word_base: usize,
+ }
+@@ -67,7 +70,8 @@ impl GpSpi {
+         }
+         let rx_len = if user & (1 << 28) != 0 { data_bits.div_ceil(8) as usize } else { 0 };
+         let rx_word_base = if user & (1 << 24) != 0 { 8 } else { 0 };
+-        self.pending = Some(GpSpiTransfer { tx, rx_len, data_len, rx_word_base });
++        let rx_dma = rx_len != 0 && self.regs.read(0x30) & (1 << 27) != 0;
++        self.pending = Some(GpSpiTransfer { tx, rx_len, rx_dma, data_len, rx_word_base });
+     }
+ 
+     pub fn has_pending_transfer(&self) -> bool { self.pending.is_some() }
+diff --git a/esp-soc/src/board.rs b/esp-soc/src/board.rs
+index f3da5f1a..5f5e394f 100644
+--- a/esp-soc/src/board.rs
++++ b/esp-soc/src/board.rs
+@@ -116,6 +116,20 @@ pub trait BoardModel {
+     fn named_pin(&self, _name: &str) -> Option<u8> { None }
+     /// The rotary encoder's (CLK, DT) pins, if there is one.
+     fn encoder(&self) -> Option<(u8, u8)> { None }
++    /// A second display on its own frame channel (web frame kind 5), for boards with two
++    /// screens. Same shape as `display`.
++    fn display_aux(&self) -> Option<(u32, u32, Vec<u16>, u64)> { None }
++    /// Cheap change counter for `display_aux`.
++    fn display_aux_version(&self) -> u64 { 0 }
++    /// A key of the board's keyboard went down or up. `code` is the board's own key number
++    /// (for a TCA8418 keypad, its key event code).
++    fn key_event(&mut self, _code: u8, _down: bool) {}
++    /// Insert a memory card with this image (whole 512-byte sectors). An empty image ejects it.
++    fn set_sd_image(&mut self, _image: Vec<u8>) {}
++    /// The memory card's current contents, if the board has a card slot with a card in it.
++    fn sd_image(&self) -> Option<&[u8]> { None }
++    /// Bumped on every block written to the card.
++    fn sd_generation(&self) -> u64 { 0 }
+     /// Lines for the end-of-run report.
+     fn report(&self) -> String { String::new() }
+ }
+diff --git a/esp-soc/src/devices/mod.rs b/esp-soc/src/devices/mod.rs
+index a3948d2d..d5a5ce46 100644
+--- a/esp-soc/src/devices/mod.rs
++++ b/esp-soc/src/devices/mod.rs
+@@ -3,9 +3,11 @@
+ //! them and adds what is module-specific — pin numbers, the visible window of a glass, where
+ //! each LED of a chain sits physically.
+ pub mod dcs_panel;
++pub mod sd_spi;
+ pub mod spi_bitbang;
+ pub mod ws2812;
+ 
+ pub use dcs_panel::DcsPanel;
++pub use sd_spi::SdCard;
+ pub use spi_bitbang::SpiBitBang;
+ pub use ws2812::Ws2812Chain;
+diff --git a/esp-soc/src/devices/sd_spi.rs b/esp-soc/src/devices/sd_spi.rs
+new file mode 100644
+index 00000000..5d225bc1
+--- /dev/null
++++ b/esp-soc/src/devices/sd_spi.rs
+@@ -0,0 +1,391 @@
++//! An SD card (SDHC, block addressed) in SPI mode, as the ESP-IDF `sdspi` host drives it.
++//!
++//! The card is a byte pump: every byte the host clocks out on MOSI is answered by one byte on
++//! MISO, the next one the card has queued (or `0xff`, the idle level, when it has nothing to
++//! say). What it queues follows the SD Physical Layer Simplified Specification, section 7 (SPI
++//! mode): a 6-byte command token `01cccccc aaaaaaaa*4 crc7<<1|1`, then after one byte of Ncr the
++//! response (R1, R1b, R2, R3 or R7), and for data commands a start token (`0xfe`) with the block
++//! and its CRC16. Writes arrive the same way in the other direction and are answered with a data
++//! response token and a short busy period.
++//!
++//! The card image is a plain byte vector of whole 512-byte sectors. Its size must be a multiple
++//! of 512 KiB so the CSD version 2.0 C_SIZE field describes it exactly.
++
++const BLOCK: usize = 512;
++
++/// R1 bits.
++const R1_IDLE: u8 = 0x01;
++const R1_ILLEGAL: u8 = 0x04;
++const R1_PARAM: u8 = 0x40;
++const R1_ADDRESS: u8 = 0x20;
++
++/// CRC7 as used by command tokens and the CID/CSD registers (polynomial x^7 + x^3 + 1).
++pub fn crc7(data: &[u8]) -> u8 {
++    let mut crc = 0u8;
++    for &byte in data {
++        for bit in (0..8).rev() {
++            let inb = (byte >> bit) & 1;
++            let top = (crc >> 6) & 1;
++            crc = (crc << 1) & 0x7f;
++            if inb ^ top != 0 { crc ^= 0x09; }
++        }
++    }
++    crc
++}
++
++/// CRC16-CCITT (polynomial 0x1021, initial 0), the data block CRC.
++pub fn crc16(data: &[u8]) -> u16 {
++    let mut crc = 0u16;
++    for &byte in data {
++        crc ^= (byte as u16) << 8;
++        for _ in 0..8 {
++            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x1021 } else { crc << 1 };
++        }
++    }
++    crc
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum Rx {
++    /// Waiting for a command token (or idle 0xff).
++    Idle,
++    /// Collecting the six bytes of a command token.
++    Command,
++    /// CMD24 / CMD25 accepted: waiting for a data start token.
++    WriteToken { multi: bool },
++    /// Collecting a data block (512 bytes + CRC16).
++    WriteData { multi: bool },
++}
++
++pub struct SdCard {
++    image: Vec<u8>,
++    out: std::collections::VecDeque<u8>,
++    rx: Rx,
++    token: [u8; 6],
++    token_len: usize,
++    block: Vec<u8>,
++    /// Sector being transferred (reads and writes).
++    sector: u64,
++    /// Multi-block read in progress: the next block is queued whenever the output drains.
++    reading: bool,
++    idle: bool,
++    app_cmd: bool,
++    crc_on: bool,
++    /// Commands seen, for diagnostics (index per command, saturating).
++    pub commands: u64,
++    pub blocks_read: u64,
++    pub blocks_written: u64,
++    /// Bumped on every write so a host can tell the image changed.
++    pub write_generation: u64,
++    pub crc_errors: u64,
++}
++
++impl SdCard {
++    pub fn new(image: Vec<u8>) -> Self {
++        SdCard {
++            image, out: Default::default(), rx: Rx::Idle, token: [0; 6], token_len: 0, block: Vec::new(),
++            sector: 0, reading: false, idle: true, app_cmd: false, crc_on: false,
++            commands: 0, blocks_read: 0, blocks_written: 0, write_generation: 0, crc_errors: 0,
++        }
++    }
++
++    pub fn image(&self) -> &[u8] { &self.image }
++    pub fn sectors(&self) -> u64 { (self.image.len() / BLOCK) as u64 }
++    pub fn is_present(&self) -> bool { !self.image.is_empty() }
++
++    /// CS went high: the card stops driving MISO and drops any half-received token. A write that
++    /// was waiting for its data token is abandoned, as the host only deselects after the data.
++    pub fn deselect(&mut self) {
++        self.out.clear();
++        self.token_len = 0;
++        self.reading = false;
++        if matches!(self.rx, Rx::Command | Rx::WriteData { .. }) { self.rx = Rx::Idle; }
++    }
++
++    /// One full-duplex byte: returns what the card drives on MISO while `mosi` is shifted in.
++    pub fn exchange(&mut self, mosi: u8) -> u8 {
++        if !self.is_present() { return 0xff; }
++        let miso = self.out.pop_front().unwrap_or(0xff);
++        self.input(mosi);
++        if self.reading && self.out.is_empty() { self.queue_read_block(); }
++        miso
++    }
++
++    fn input(&mut self, b: u8) {
++        match self.rx {
++            Rx::Idle | Rx::Command if self.token_len == 0 => {
++                // A command starts with start bit 0, transmission bit 1.
++                if b & 0xc0 == 0x40 {
++                    self.token[0] = b;
++                    self.token_len = 1;
++                    self.rx = Rx::Command;
++                }
++            }
++            Rx::Idle | Rx::Command => {
++                self.token[self.token_len] = b;
++                self.token_len += 1;
++                if self.token_len == 6 {
++                    self.token_len = 0;
++                    self.rx = Rx::Idle;
++                    self.command();
++                }
++            }
++            Rx::WriteToken { multi } => {
++                if b == 0xfe || (multi && b == 0xfc) {
++                    self.block.clear();
++                    self.rx = Rx::WriteData { multi };
++                } else if multi && b == 0xfd {
++                    // Stop Tran: a byte of busy, then idle.
++                    self.rx = Rx::Idle;
++                    self.out.extend([0xff, 0x00, 0x00]);
++                } else if b & 0xc0 == 0x40 {
++                    // A command instead of data (CMD12 or a host giving up): handle it.
++                    self.rx = Rx::Command;
++                    self.token[0] = b;
++                    self.token_len = 1;
++                }
++            }
++            Rx::WriteData { multi } => {
++                self.block.push(b);
++                if self.block.len() == BLOCK + 2 {
++                    let ok = self.write_block();
++                    // Data response token xxx0sss1: 010 accepted, 101 CRC error, 110 write error.
++                    self.out.push_back(match ok { Ok(()) => 0x05, Err(true) => 0x0b, Err(false) => 0x0d });
++                    self.out.extend([0x00, 0x00, 0x00]);           // programming: busy
++                    self.rx = if multi && ok.is_ok() { Rx::WriteToken { multi } } else { Rx::Idle };
++                }
++            }
++        }
++    }
++
++    /// Ok, or Err(true) for a CRC error / Err(false) for an address error.
++    fn write_block(&mut self) -> Result<(), bool> {
++        let data = &self.block[..BLOCK];
++        if self.crc_on {
++            let crc = u16::from_be_bytes([self.block[BLOCK], self.block[BLOCK + 1]]);
++            if crc != crc16(data) { self.crc_errors += 1; return Err(true); }
++        }
++        let off = self.sector as usize * BLOCK;
++        if off + BLOCK > self.image.len() { return Err(false); }
++        self.image[off..off + BLOCK].copy_from_slice(data);
++        self.sector += 1;
++        self.blocks_written += 1;
++        self.write_generation += 1;
++        Ok(())
++    }
++
++    fn r1(&self) -> u8 { if self.idle { R1_IDLE } else { 0 } }
++
++    fn respond(&mut self, bytes: &[u8]) {
++        self.out.clear();
++        self.out.push_back(0xff);                                // Ncr: one byte
++        self.out.extend(bytes.iter().copied());
++    }
++
++    fn data_block(&mut self, data: &[u8]) {
++        self.out.push_back(0xff);                                // Nac
++        self.out.push_back(0xfe);
++        self.out.extend(data.iter().copied());
++        self.out.extend(crc16(data).to_be_bytes());
++    }
++
++    fn queue_read_block(&mut self) {
++        let off = self.sector as usize * BLOCK;
++        if off + BLOCK > self.image.len() {
++            self.reading = false;
++            self.out.push_back(0x09);                             // data error token: out of range
++            return;
++        }
++        let block = self.image[off..off + BLOCK].to_vec();
++        self.data_block(&block);
++        self.sector += 1;
++        self.blocks_read += 1;
++    }
++
++    fn command(&mut self) {
++        self.commands += 1;
++        let cmd = self.token[0] & 0x3f;
++        let arg = u32::from_be_bytes([self.token[1], self.token[2], self.token[3], self.token[4]]);
++        // CRC is mandatory for CMD0 and CMD8 even with CRC off; the host always sends it, so the
++        // card checks it whenever the host has turned checking on, and for those two always.
++        let crc_ok = (crc7(&self.token[..5]) << 1 | 1) == self.token[5];
++        if !crc_ok && (self.crc_on || cmd == 0 || cmd == 8) {
++            self.crc_errors += 1;
++            self.app_cmd = false;
++            self.respond(&[self.r1() | 0x08]);                   // COM_CRC_ERROR
++            return;
++        }
++        let app = std::mem::take(&mut self.app_cmd);
++        if cmd != 12 { self.reading = false; }
++        if app {
++            match cmd {
++                41 => { self.idle = false; self.respond(&[0x00]); }
++                51 => { let r = self.r1(); self.respond(&[r]); self.data_block(&[0x02, 0x35, 0x80, 0x00, 0, 0, 0, 0]); }
++                13 => { let r = self.r1(); self.respond(&[r, 0x00]); self.data_block(&Self::sd_status()); }
++                22 => { let r = self.r1(); self.respond(&[r]); let n = (self.blocks_written as u32).to_be_bytes(); self.data_block(&n); }
++                23 | 42 => { let r = self.r1(); self.respond(&[r]); }
++                _ => { let r = self.r1(); self.respond(&[r | R1_ILLEGAL]); }
++            }
++            return;
++        }
++        let r1 = self.r1();
++        match cmd {
++            0 => { self.idle = true; self.rx = Rx::Idle; self.respond(&[R1_IDLE]); }
++            8 => { self.respond(&[r1, 0x00, 0x00, (arg >> 8) as u8 & 0x0f, arg as u8]); }
++            58 => {
++                // OCR: powered up (bit 31) once initialised, CCS (bit 30, SDHC), 2.7-3.6 V.
++                let ocr: u32 = if self.idle { 0x00ff_8000 } else { 0xc0ff_8000 };
++                let mut r = vec![r1];
++                r.extend(ocr.to_be_bytes());
++                self.respond(&r);
++            }
++            59 => { self.crc_on = arg & 1 != 0; self.respond(&[r1]); }
++            55 => { self.app_cmd = true; self.respond(&[r1]); }
++            1 => { self.idle = false; self.respond(&[0x00]); }
++            9 => { self.respond(&[r1]); let csd = self.csd(); self.data_block(&csd); }
++            10 => { self.respond(&[r1]); let cid = Self::cid(); self.data_block(&cid); }
++            13 => { self.respond(&[r1, 0x00]); }
++            16 => { self.respond(&[if arg as usize == BLOCK { r1 } else { r1 | R1_PARAM }]); }
++            6 => { self.respond(&[r1]); self.data_block(&Self::switch_status(arg)); }
++            12 => {
++                // Stop: a stuff byte, R1, then busy.
++                self.reading = false;
++                self.out.clear();
++                self.out.extend([0xff, 0xff, r1, 0x00, 0xff]);
++            }
++            17 | 18 => {
++                if u64::from(arg) >= self.sectors() { self.respond(&[r1 | R1_ADDRESS]); return; }
++                self.sector = u64::from(arg);
++                self.respond(&[r1]);
++                self.queue_read_block();
++                self.reading = cmd == 18;
++            }
++            24 | 25 => {
++                if u64::from(arg) >= self.sectors() { self.respond(&[r1 | R1_ADDRESS]); return; }
++                self.sector = u64::from(arg);
++                self.respond(&[r1]);
++                self.rx = Rx::WriteToken { multi: cmd == 25 };
++            }
++            32 | 33 => { self.respond(&[r1]); }
++            38 => { self.respond(&[r1, 0x00, 0x00]); }
++            _ => { self.respond(&[r1 | R1_ILLEGAL]); }
++        }
++    }
++
++    /// CSD version 2.0 (SDHC): C_SIZE = sectors / 1024 - 1.
++    fn csd(&self) -> [u8; 16] {
++        let c_size = (self.sectors() / 1024).saturating_sub(1) as u32;
++        let mut csd = [0x40, 0x0e, 0x00, 0x32, 0x5b, 0x59, 0x00,
++                       ((c_size >> 16) & 0x3f) as u8, (c_size >> 8) as u8, c_size as u8,
++                       0x7f, 0x80, 0x0a, 0x40, 0x00, 0x00];
++        csd[15] = crc7(&csd[..15]) << 1 | 1;
++        csd
++    }
++
++    fn cid() -> [u8; 16] {
++        // MID 0x45 OID "EM" PNM "EMUSD" PRV 1.0 PSN 0x12345678 MDT 2026-10
++        let mut cid = [0x45, b'E', b'M', b'E', b'M', b'U', b'S', b'D', 0x10, 0x12, 0x34, 0x56, 0x78, 0x01, 0x6a, 0];
++        cid[15] = crc7(&cid[..15]) << 1 | 1;
++        cid
++    }
++
++    fn sd_status() -> [u8; 64] {
++        let mut s = [0u8; 64];
++        s[8] = 0x02;          // SPEED_CLASS 4
++        s[10] = 0x90;         // AU_SIZE 4 MiB
++        s
++    }
++
++    /// CMD6 status: only function 0 (default speed) and 1 (high speed) of group 1 exist.
++    fn switch_status(arg: u32) -> [u8; 64] {
++        let mut s = [0u8; 64];
++        s[0] = 0x00; s[1] = 0x64;            // max current 100 mA
++        s[12] = 0x80; s[13] = 0x03;          // group 1 supports functions 0 and 1
++        let f = (arg & 0xf) as u8;
++        s[16] = if f == 0xf || f <= 1 { if f == 0xf { 0 } else { f } } else { 0xf };
++        s
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn token(cmd: u8, arg: u32) -> [u8; 6] {
++        let mut t = [0x40 | cmd, (arg >> 24) as u8, (arg >> 16) as u8, (arg >> 8) as u8, arg as u8, 0];
++        t[5] = crc7(&t[..5]) << 1 | 1;
++        t
++    }
++
++    /// Send a token then `n` idle bytes, returning everything read back after the token.
++    fn cmd(card: &mut SdCard, cmd: u8, arg: u32, n: usize) -> Vec<u8> {
++        for b in token(cmd, arg) { card.exchange(b); }
++        (0..n).map(|_| card.exchange(0xff)).collect()
++    }
++
++    fn r1(reply: &[u8]) -> u8 { *reply.iter().find(|&&b| b != 0xff).unwrap() }
++
++    fn init(card: &mut SdCard) {
++        assert_eq!(r1(&cmd(card, 0, 0, 8)), 0x01);
++        let r7 = cmd(card, 8, 0x1aa, 8);
++        assert_eq!(&r7[1..6], &[0x01, 0, 0, 0x01, 0xaa]);
++        assert_eq!(r1(&cmd(card, 59, 1, 8)), 0x01);
++        assert_eq!(r1(&cmd(card, 55, 0, 8)), 0x01);
++        assert_eq!(r1(&cmd(card, 41, 0x4000_0000, 8)), 0x00);
++        let r3 = cmd(card, 58, 0, 8);
++        assert_eq!(&r3[1..6], &[0x00, 0xc0, 0xff, 0x80, 0x00]);
++    }
++
++    #[test]
++    fn known_crcs() {
++        assert_eq!(token(0, 0)[5], 0x95);
++        assert_eq!(token(8, 0x1aa)[5], 0x87);
++        assert_eq!(crc16(&[0xff; 512]), 0x7fa1);
++    }
++
++    #[test]
++    fn initialises_and_reads_csd_and_blocks() {
++        let mut img = vec![0u8; 1024 * 1024];
++        img[512..1024].fill(0xab);
++        let mut card = SdCard::new(img);
++        init(&mut card);
++        let csd = cmd(&mut card, 9, 0, 24);
++        let start = csd.iter().position(|&b| b == 0xfe).unwrap();
++        assert_eq!(csd[start + 1], 0x40);
++        assert_eq!(&csd[start + 8..start + 11], &[0x00, 0x00, 0x01], "C_SIZE 1 = 1 MiB");
++        let rd = cmd(&mut card, 17, 1, 530);
++        let start = rd.iter().position(|&b| b == 0xfe).unwrap();
++        assert!(rd[start + 1..start + 513].iter().all(|&b| b == 0xab));
++        assert_eq!(u16::from_be_bytes([rd[start + 513], rd[start + 514]]), crc16(&[0xab; 512]));
++    }
++
++    #[test]
++    fn writes_a_block_with_crc() {
++        let mut card = SdCard::new(vec![0u8; 512 * 1024]);
++        init(&mut card);
++        assert_eq!(r1(&cmd(&mut card, 24, 3, 4)), 0x00);
++        card.exchange(0xfe);
++        for _ in 0..512 { card.exchange(0x5a); }
++        let crc = crc16(&[0x5a; 512]).to_be_bytes();
++        card.exchange(crc[0]);
++        card.exchange(crc[1]);
++        let resp: Vec<u8> = (0..6).map(|_| card.exchange(0xff)).collect();
++        assert_eq!(resp[0] & 0x1f, 0x05, "{resp:02x?}");
++        assert!(card.image()[3 * 512..4 * 512].iter().all(|&b| b == 0x5a));
++        assert_eq!(card.write_generation, 1);
++    }
++
++    #[test]
++    fn multi_block_read_stops_on_cmd12() {
++        let mut card = SdCard::new((0..512 * 1024).map(|i| (i / 512) as u8).collect());
++        init(&mut card);
++        let rd = cmd(&mut card, 18, 2, 1100);
++        let blocks: Vec<usize> = rd.windows(2).enumerate().filter(|(_, w)| w[0] == 0xff && w[1] == 0xfe).map(|(i, _)| i + 1).collect();
++        assert!(blocks.len() >= 2);
++        assert_eq!(rd[blocks[0] + 1], 2);
++        assert_eq!(rd[blocks[1] + 1], 3);
++        let stop = cmd(&mut card, 12, 0, 8);
++        assert_eq!(r1(&stop[1..]), 0x00);
++        assert!(!card.reading);
++    }
++}
+diff --git a/esp-soc/src/load.rs b/esp-soc/src/load.rs
+index 8e709a26..29e0aa37 100644
+--- a/esp-soc/src/load.rs
++++ b/esp-soc/src/load.rs
+@@ -28,6 +28,8 @@ pub enum LoadKind {
+     Flash = 5,
+     Script = 6,
+     CameraPicture = 7,
++    /// A memory card image for the board's card slot.
++    SdImage = 8,
+ }
+ 
+ impl TryFrom<u32> for LoadKind {
+@@ -42,6 +44,7 @@ impl TryFrom<u32> for LoadKind {
+             5 => Ok(Self::Flash),
+             6 => Ok(Self::Script),
+             7 => Ok(Self::CameraPicture),
++            8 => Ok(Self::SdImage),
+             _ => Err(format!("unknown load kind {kind}")),
+         }
+     }
+@@ -65,6 +68,11 @@ impl<S: Soc> Machine<S> {
+                 self.bus.board().set_camera_picture(picture);
+                 Ok(())
+             }
++            LoadKind::SdImage => {
++                if data.len() % 512 != 0 { return Err("card image is not whole 512-byte sectors".into()); }
++                self.bus.board().set_sd_image(data.to_vec());
++                Ok(())
++            }
+         }
+     }
+ 
+diff --git a/esp-soc/src/machine.rs b/esp-soc/src/machine.rs
+index d7a5b6b5..f9facbff 100644
+--- a/esp-soc/src/machine.rs
++++ b/esp-soc/src/machine.rs
+@@ -14,7 +14,7 @@ mod modeled;
+ mod web;
+ 
+ #[derive(Clone, Debug)]
+-pub enum ScriptAction { Gpio(u8, bool), Serial(String), Uart(usize, String), Stop, Touch(u16, u16, bool), Poke(u32, u32), Analog(u8, esp_periph::AnalogSource),
++pub enum ScriptAction { Gpio(u8, bool), Key(u8, bool), Serial(String), Uart(usize, String), Stop, Touch(u16, u16, bool), Poke(u32, u32), Analog(u8, esp_periph::AnalogSource),
+     /// `waituart0 <timeout_s> <text>`: hold the rest of the script until UART0 prints `text` (or the
+     /// timeout passes), then shift every later action by the time actually waited. Fields: text,
+     /// timeout in cycles, the cycle the script placed it at.
+@@ -41,6 +41,10 @@ pub struct Script { pub events: Vec<(u64, ScriptAction)>, pub pos: usize, pub lo
+                    /// UART0 text seen so far (capped) and where the pending wait started looking
+                    uart0_seen: Vec<u8>, wait_mark: Option<usize> }
+ 
++/// Per-core self-yield run, for spin skip.
++#[derive(Clone, Copy, Default)]
++struct SpinState { run: u32, last_insn: u64, parked: bool }
++
+ pub struct Realtime {
+     pub enabled: bool,
+     wall_start: Option<std::time::Instant>,
+@@ -57,9 +61,15 @@ pub struct Realtime {
+ }
+ 
+ struct WebState { last_push_cycles: u64, /// EX170: `CPU_HZ / display_push_hz()` as of the last evaluation (0 = not evaluated yet); boards are fixed once booted.
+-    push_interval: u64, audio_sent: usize, ring_updates: u64, grid_updates: Vec<u64>, px_pending: u64, px_sent: u64, px_deferred: bool, cam_pushed: u64, cam_sent: bool }
++    push_interval: u64, audio_sent: usize, ring_updates: u64, grid_updates: Vec<u64>, px_pending: u64, px_sent: u64, px_deferred: bool, aux_sent: u64, cam_pushed: u64, cam_sent: bool }
+ 
+ pub struct Machine<S: Soc> {
++    /// Spin skip (off by default): park a core that keeps yielding to itself without touching
++    /// a device until its next interrupt. See `set_spin_skip`.
++    pub spin_skip: bool,
++    spin: [SpinState; 4],
++    /// Cores parked by spin skip so far.
++    pub spin_parks: u64,
+     pub mac: [u8; 6],
+     pub reboots: u64,
+     /// function stubs: at this pc (a function entry), return `value` immediately
+@@ -153,7 +163,8 @@ impl<S: Soc> Machine<S> {
+             exceptions: 0, interrupts: 0, irq_hist: vec![[0; 32]; S::CORES],
+             script: Script { events: Vec::new(), pos: 0, log: true, knob_next: 0, uart0_seen: Vec::new(), wait_mark: None }, max_cycles: u64::MAX,
+             console: Console { all: Vec::new(), usb: Vec::new(), uart0: Vec::new(), mask: 3, prefix: false, capture: false },
+-            web: None, ws: WebState { last_push_cycles: 0, push_interval: 0, audio_sent: 0, ring_updates: 0, grid_updates: Vec::new(), px_pending: 0, px_sent: 0, px_deferred: false, cam_pushed: u64::MAX, cam_sent: false },
++            spin_skip: false, spin: [SpinState::default(); 4], spin_parks: 0,
++            web: None, ws: WebState { last_push_cycles: 0, push_interval: 0, audio_sent: 0, ring_updates: 0, grid_updates: Vec::new(), px_pending: 0, px_sent: 0, px_deferred: false, aux_sent: 0, cam_pushed: u64::MAX, cam_sent: false },
+             rt: Realtime { enabled: false, wall_start: None, last_check: 0, behind: 0.0, resyncs: 0, speed: None, speed_mark: None, log: false, log_last: None, log_insns: (0, 0) },
+             debug_rom: false, cost: None, model_accesses: Vec::new(), approximate_jit_timing: None, approximate_jit_frontiers: false, model_ready_at: vec![0; S::CORES], model_stop: None, model_attach_error: None,
+         }
+@@ -390,6 +401,7 @@ impl<S: Soc> Machine<S> {
+             }
+             if let Some(&ret) = self.stubs.get(&pc) { cpu.return_from_stub(&mut self.bus, ret); self.stub_hits += 1; return (1, None); }
+         }
++        self.bus.set_current_core(core);
+         let (used, trap) = cpu.run(&mut self.bus, budget);
+         self.finish_step(core, pc, used, trap)
+     }
+@@ -411,6 +423,7 @@ impl<S: Soc> Machine<S> {
+     #[cfg_attr(target_arch = "wasm32", inline)]
+     #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+     fn observe_execution(&mut self, core: usize, pc: u32, used: u32, trap: Option<Trap>) -> Option<Stop> {
++        if self.spin_skip { self.spin_check(core); }
+         if self.probes.contains(Wants::BLOCK | Wants::TRAP | Wants::TRAP_PC) {
+             let cx = Ctx { symbols: &self.symbols, cycles: self.bus.cycles(), cpu_hz: S::CPU_HZ };
+             let cpu = &self.cores[core];
+@@ -431,6 +444,38 @@ impl<S: Soc> Machine<S> {
+         None
+     }
+ 
++    /// Spin skip. A core that raises its own yield interrupt over and over, a few thousand
++    /// instructions apart, without touching any device register in between, is polling RAM
++    /// (FreeRTOS `vTaskDelay(0)` / `taskYIELD()` loops, e.g. a delay that rounds down to zero
++    /// ticks). Nothing it can observe changes until an interrupt or the other core writes
++    /// memory, so after `SPIN_RUN` such yields the core is parked until its next interrupt,
++    /// and the withdrawn yield is raised again when it wakes. To the firmware this looks like
++    /// the task being preempted for up to one tick; it saves emulating the spinning.
++    fn spin_check(&mut self, core: usize) {
++        const SPIN_RUN: u32 = 32;
++        const SPIN_GAP: u64 = 4000;
++        let (yielded, io) = self.bus.take_spin_activity();
++        let insns = self.cores[core].insn_count();
++        let st = &mut self.spin[core];
++        if st.parked && !self.cores[core].waiting() {
++            st.parked = false;
++            self.bus.restore_self_yield(core);
++        }
++        if io { st.run = 0; }
++        if !yielded { return; }
++        st.run = if insns.wrapping_sub(st.last_insn) < SPIN_GAP && !io { st.run + 1 } else { 1 };
++        st.last_insn = insns;
++        if st.run >= SPIN_RUN && !st.parked && self.bus.defer_self_yield(core) {
++            st.run = 0;
++            st.parked = true;
++            self.cores[core].park();
++            self.spin_parks += 1;
++        }
++    }
++
++    /// Enable or disable spin skip (see `spin_check`).
++    pub fn set_spin_skip(&mut self, on: bool) { self.spin_skip = on; }
++
+     /// Observe sleeping PCs without advancing their instruction or device clocks.
+     #[inline]
+     fn observe_idle_pcs(&mut self, on: &[bool]) -> Option<Stop> {
+@@ -468,6 +513,7 @@ impl<S: Soc> Machine<S> {
+         }
+         let cpu = &mut self.cores[core];
+         self.bus.note_pc(pc);
++        self.bus.set_current_core(core);
+         let outcome = cpu.step(&mut self.bus);
+         if let Some(stop) = self.observe_execution(core, pc, u32::from(outcome.kind != emu_core::StepKind::Idle), outcome.trap()) { return Some(stop); }
+         self.refresh_irq();
+@@ -810,6 +856,7 @@ impl<S: Soc> Machine<S> {
+                     // lane-s2b: a start the core prepared runs without step_blocks' stub/probe test (the
+                     // memo never names a boundary PC and batches run without observers).
+                     let pc = self.cores[i].pc();
++                    self.bus.set_current_core(i);
+                     let (used, stop) = match self.cores[i].run_prepared(&mut self.bus, left) {
+                         Some((used, trap)) => { self.bb_stats[7] += 1; self.finish_step(i, pc, used, trap) }
+                         None => self.step_blocks(i, left),
+@@ -1013,6 +1060,7 @@ impl<S: Soc> Machine<S> {
+                 ScriptAction::Uart(n, text) => self.bus.uart_input(n, text.as_bytes()),
+                 ScriptAction::Stop => { self.max_cycles = 0; stopped = true; }
+                 ScriptAction::Touch(x, y, d) => { self.bus.touch_input(x, y, d); }
++                ScriptAction::Key(code, down) => { self.bus.board().key_event(code, down); }
+                 ScriptAction::Poke(a, v) => { let _ = self.bus.write32_unpriced(a, v); }
+                 ScriptAction::Analog(pin, mut src) => {
+                     // a waveform plays from when it is applied: a `waituart0` before it moves `t`, so the start moves too
+@@ -1103,6 +1151,7 @@ impl<S: Soc> Machine<S> {
+                 "release" => ev.push((c, ScriptAction::Gpio(pin(rest)?, true))),
+                 "gpio" => { let mut p = rest.split_whitespace(); let pn = pin(p.next().unwrap_or(""))?; let l = p.next().unwrap_or("1") == "1"; ev.push((c, ScriptAction::Gpio(pn, l))); }
+                 "poke" => { let mut p = rest.split_whitespace(); let a = u32::from_str_radix(p.next().unwrap_or("0").trim_start_matches("0x"), 16).map_err(|e| e.to_string())?; let v = u32::from_str_radix(p.next().unwrap_or("0").trim_start_matches("0x"), 16).map_err(|e| e.to_string())?; ev.push((c, ScriptAction::Poke(a, v))); }
++                "kbd" => { let mut p = rest.split_whitespace(); let code: u8 = p.next().and_then(|v| v.parse().ok()).unwrap_or(0); let d = p.next().unwrap_or("1") == "1"; ev.push((c, ScriptAction::Key(code, d))); }
+                 "touch" => { let mut p = rest.split_whitespace(); let x: u16 = p.next().and_then(|v| v.parse().ok()).unwrap_or(0); let y: u16 = p.next().and_then(|v| v.parse().ok()).unwrap_or(0); let d = p.next().unwrap_or("1") == "1"; ev.push((c, ScriptAction::Touch(x, y, d))); }
+                 "serial" => ev.push((c, ScriptAction::Serial(format!("{}\n", rest)))),
+                 // adc <gpio> <volts>: constant voltage on an analog pad
+@@ -1170,7 +1219,11 @@ impl<S: Soc> Machine<S> {
+     /// Save the board's display (scaled) as PNG.
+     pub fn write_tft_png(&self, path: &str, scale: usize) -> std::io::Result<()> {
+         let Some((w, h, px, _)) = self.bus.board_ref().display() else { return Err(std::io::Error::other("this board has no display")) };
+-        png::write_png_rgb565(path, &px, w as usize, h as usize, if w > 200 { 1 } else { scale })
++        png::write_png_rgb565(path, &px, w as usize, h as usize, if w > 200 { 1 } else { scale })?;
++        if let Some((w, h, px, _)) = self.bus.board_ref().display_aux() {
++            png::write_png_rgb565(&format!("{path}.aux.png"), &px, w as usize, h as usize, 1)?;
++        }
++        Ok(())
+     }
+     pub fn write_gram_png(&self, path: &str) -> std::io::Result<()> {
+         let Some((px, cols, rows)) = self.bus.board_ref().gram() else { return Err(std::io::Error::other("this board has no TFT")) };
+diff --git a/esp-soc/src/machine/web.rs b/esp-soc/src/machine/web.rs
+index f0cd30a3..912cd1e8 100644
+--- a/esp-soc/src/machine/web.rs
++++ b/esp-soc/src/machine/web.rs
+@@ -54,6 +54,17 @@ impl<S: Soc> Machine<S> {
+                 w.send_binary(&display_message(w_, h_, &px));
+             }
+         }
++        // The second display, if the board has one: frame kind 5 so the page can route it.
++        let board = self.bus.board_ref();
++        let aux_ver = board.display_aux_version();
++        if aux_ver != self.ws.aux_sent {
++            if let Some((w_, h_, px, _)) = board.display_aux() {
++                self.ws.aux_sent = aux_ver;
++                let mut message = display_message(w_, h_, &px);
++                message[0] = 5;
++                w.send_binary(&message);
++            }
++        }
+         let board = self.bus.board_ref();
+         if self.ws.cam_pushed != self.bus.camera_frames() / 20 || !self.ws.cam_sent {
+             if let Some(rgb) = board.camera_preview(320, 240) {
+@@ -147,6 +158,8 @@ impl<S: Soc> Machine<S> {
+                 }
+                 // the page's Restart on a native run: the board's reset button
+                 "reset" if self.web_restart => { self.button_reset = true; self.bus.request_reset(esp_periph::RST_POWERON); *self.bus.irq_dirty() = true; }
++                "kbd" => { let code: u8 = field("code").and_then(|v| v.parse().ok()).unwrap_or(0);
++                           let down = field("down").unwrap_or_default() == "1"; self.bus.board().key_event(code, down); }
+                 "touch" => { let x: u16 = field("x").and_then(|v| v.parse().ok()).unwrap_or(0); let y: u16 = field("y").and_then(|v| v.parse().ok()).unwrap_or(0);
+                              let down = field("down").unwrap_or_default() == "1"; self.bus.touch_input(x, y, down); }
+                 _ => {}
+diff --git a/esp-soc/src/soc.rs b/esp-soc/src/soc.rs
+index 67bb8ad2..c9a28fbc 100644
+--- a/esp-soc/src/soc.rs
++++ b/esp-soc/src/soc.rs
+@@ -79,6 +79,15 @@ pub trait SocBus: Bus {
+     /// Whether `set_defer` is honoured; without it a multi-quantum run is never attempted.
+     fn can_defer(&self) -> bool { false }
+     fn set_defer(&mut self, on: bool) { let _ = on; }
++    /// The core about to execute, so the bus can attribute register accesses (spin skip).
++    fn set_current_core(&mut self, core: usize) { let _ = core; }
++    /// Since the last call: (the current core raised its own software yield interrupt, it
++    /// touched any other device register). Buses without support report device activity.
++    fn take_spin_activity(&mut self) -> (bool, bool) { (false, true) }
++    /// Withdraw `core`'s pending self-yield so the core can be parked; false if unsupported.
++    fn defer_self_yield(&mut self, core: usize) -> bool { let _ = core; false }
++    /// Raise the yield withdrawn by `defer_self_yield` again.
++    fn restore_self_yield(&mut self, core: usize) { let _ = core; }
+     /// Whether the last dispatch stopped in front of a device-register access; clears it.
+     fn take_deferred(&mut self) -> bool { false }
+     /// Re-derive the interrupt lines after a device change; true if a core's input may differ.
+diff --git a/esp32s3/src/board/cardputer_adv.rs b/esp32s3/src/board/cardputer_adv.rs
+new file mode 100644
+index 00000000..51111924
+--- /dev/null
++++ b/esp32s3/src/board/cardputer_adv.rs
+@@ -0,0 +1,323 @@
++//! M5Stack Cardputer ADV (Stamp-S3A), optionally with the TERM512 external display.
++//!
++//! Pins are taken from the libraries the firmware links, at the revisions AREA512 pins them
++//! (M5GFX 27e1ef0, M5Unified 8108bfa) and from AREA512's own HAL:
++//!
++//! - Built-in 1.14" ST7789V2, 135x240 behind a 240x320 controller RAM (offset 52, 40):
++//!   MOSI 35, SCLK 36, DC 34, CS 37, RST 33, backlight 38 (`M5GFX.cpp`, `board_M5CardputerADV`).
++//!   M5GFX identifies the panel by reading RDDID (0x04) over 3-wire SPI and expects 0x81 or
++//!   0x85 in the first byte; it then tells the Cardputer from the ADV by reading GPIO 8/9 with
++//!   pull-downs, which the ADV's I2C pull-ups hold high.
++//! - TCA8418 keypad controller at 0x34 on the internal I2C, SDA 8 / SCL 9 (`M5Unified.cpp`,
++//!   AREA512 `console/keyboard.cpp`). Key event codes are `row * 10 + col + 1` of the
++//!   controller's matrix; AREA512's `cardputer_lookup_key` gives each its legend.
++//! - microSD (TF slot) on SPI2: SCLK 40, MOSI 14, MISO 39, CS 12 (AREA512 `sd/area512_sd.c`).
++//! - TERM512 CapTFT (AREA512 TFT builds only): a 240x320 ST7789 (or ILI9341) on SPI2 sharing
++//!   the card's bus, DC 6, CS 5, RST 3 (`captft/gfx/area512_display.cpp`).
++//!
++//! The board routes every SPI transaction by the chip selects that are low during it, so the
++//! panel, the card and the external display can share hosts the way the firmware shares them.
++use esp_soc::board::{BoardModel, SpiPins};
++use esp_soc::devices::{DcsPanel, SdCard};
++use crate::i2c::I2cDevice;
++use std::collections::VecDeque;
++use std::sync::{Arc, Mutex};
++
++pub const LCD_MOSI: u8 = 35;
++pub const LCD_SCLK: u8 = 36;
++pub const LCD_DC: u8 = 34;
++pub const LCD_CS: u8 = 37;
++pub const LCD_RST: u8 = 33;
++pub const LCD_BL: u8 = 38;
++pub const LCD_W: usize = 240;
++pub const LCD_H: usize = 135;
++
++pub const KBD_SDA: u8 = 8;
++pub const KBD_SCL: u8 = 9;
++pub const KBD_ADDR: u8 = 0x34;
++pub const KBD_INT: u8 = 11;
++
++pub const SD_SCLK: u8 = 40;
++pub const SD_MOSI: u8 = 14;
++pub const SD_MISO: u8 = 39;
++pub const SD_CS: u8 = 12;
++
++pub const EXT_DC: u8 = 6;
++pub const EXT_CS: u8 = 5;
++pub const EXT_RST: u8 = 3;
++
++pub const BTN_G0: u8 = 0;
++
++/// ST7789V2 RDDID: manufacturer 0x85, version 0x85, driver 0x52.
++const ST7789_ID: [u8; 3] = [0x85, 0x85, 0x52];
++
++/// TCA8418 register file and key event FIFO (TI SCPS215, section 8.6).
++#[derive(Default)]
++pub struct Tca8418State {
++    pub regs: [u8; 32],
++    pub fifo: VecDeque<u8>,
++    pub events: u64,
++}
++
++impl Tca8418State {
++    const CFG: usize = 0x01;
++    const INT_STAT: usize = 0x02;
++    const KEY_LCK_EC: usize = 0x03;
++    const KEY_EVENT_A: usize = 0x04;
++    const FIFO_DEPTH: usize = 10;
++
++    fn read(&mut self, reg: usize) -> u8 {
++        match reg {
++            Self::KEY_LCK_EC => (self.regs[reg] & 0xf0) | self.fifo.len() as u8,
++            Self::KEY_EVENT_A..=0x0d => {
++                // Reading KEY_EVENT_A pops the FIFO; 0 means empty.
++                if reg == Self::KEY_EVENT_A { self.fifo.pop_front().unwrap_or(0) } else { self.fifo.get(reg - Self::KEY_EVENT_A).copied().unwrap_or(0) }
++            }
++            Self::INT_STAT => self.regs[reg] | u8::from(!self.fifo.is_empty()),
++            r if r < self.regs.len() => self.regs[r],
++            _ => 0,
++        }
++    }
++
++    fn write(&mut self, reg: usize, v: u8) {
++        match reg {
++            Self::INT_STAT => self.regs[reg] &= !v,          // write 1 to clear
++            Self::KEY_EVENT_A..=0x0d => {}
++            r if r < self.regs.len() => self.regs[r] = v,
++            _ => {}
++        }
++    }
++
++    pub fn key(&mut self, code: u8, down: bool) {
++        if self.fifo.len() >= Self::FIFO_DEPTH {
++            self.regs[Self::INT_STAT] |= 0x08;              // OVR_FLOW_INT
++            return;
++        }
++        self.fifo.push_back((code & 0x7f) | if down { 0x80 } else { 0 });
++        self.regs[Self::INT_STAT] |= 0x01;                  // K_INT
++        self.events += 1;
++    }
++}
++
++/// The TCA8418 as seen from the I2C controller. Register writes are `reg, value...`; reads
++/// return the register selected by the last write, auto-incrementing when CFG.AI is set
++/// (except on the FIFO, which every read pops).
++pub struct Tca8418 { state: Arc<Mutex<Tca8418State>>, ptr: usize, first: bool }
++
++impl I2cDevice for Tca8418 {
++    fn pins(&self) -> Option<(u8, u8)> { Some((KBD_SDA, KBD_SCL)) }
++    fn start(&mut self, read: bool) -> bool { if !read { self.first = true; } true }
++    fn write(&mut self, b: u8) -> bool {
++        if self.first { self.ptr = b as usize; self.first = false; return true; }
++        let mut st = self.state.lock().unwrap();
++        st.write(self.ptr, b);
++        if st.regs[Tca8418State::CFG] & 0x80 != 0 { self.ptr = (self.ptr + 1) % 32; }
++        true
++    }
++    fn read(&mut self) -> u8 {
++        let mut st = self.state.lock().unwrap();
++        let v = st.read(self.ptr);
++        if st.regs[Tca8418State::CFG] & 0x80 != 0 && self.ptr != Tca8418State::KEY_EVENT_A { self.ptr = (self.ptr + 1) % 32; }
++        v
++    }
++}
++
++/// One ST7789 on an SPI chip select: the D/C line, reset, and the reply to register reads.
++struct Panel {
++    dcs: DcsPanel,
++    in_reset: bool,
++    /// The last command byte, so a following read knows what to return.
++    last_cmd: u8,
++}
++
++impl Panel {
++    fn new() -> Self { Panel { dcs: DcsPanel::st7789(), in_reset: false, last_cmd: 0 } }
++    fn transfer(&mut self, tx: &[u8], rx_len: usize) -> Vec<u8> {
++        if !self.in_reset {
++            for &b in tx {
++                if !self.dcs.dc { self.last_cmd = b; }
++                self.dcs.byte(b);
++            }
++        }
++        if rx_len == 0 { return Vec::new(); }
++        match self.last_cmd {
++            0x04 => ST7789_ID.iter().copied().chain(std::iter::repeat(0)).take(rx_len).collect(),
++            0xda => vec![ST7789_ID[0]; rx_len],
++            0xdb => vec![ST7789_ID[1]; rx_len],
++            0xdc => vec![ST7789_ID[2]; rx_len],
++            _ => vec![0; rx_len],
++        }
++    }
++}
++
++pub struct CardputerAdv {
++    lcd: Panel,
++    ext: Panel,
++    pub sd: SdCard,
++    sd_selected: bool,
++    kbd: Arc<Mutex<Tca8418State>>,
++    backlight: bool,
++    gpio_events: u64,
++}
++
++impl Default for CardputerAdv { fn default() -> Self { Self::new() } }
++
++impl CardputerAdv {
++    pub fn new() -> Self {
++        CardputerAdv {
++            lcd: Panel::new(), ext: Panel::new(), sd: SdCard::new(Vec::new()), sd_selected: false,
++            kbd: Arc::new(Mutex::new(Tca8418State::default())), backlight: false, gpio_events: 0,
++        }
++    }
++
++    /// What the Cardputer's glass shows, 240x135 landscape. With M5GFX's rotation 1 the app's x
++    /// runs down controller rows 40..280 and its y runs right to left across columns 52..187.
++    pub fn lcd_frame(&self) -> Vec<u16> {
++        let p = &self.lcd.dcs;
++        let mut out = vec![0u16; LCD_W * LCD_H];
++        // The panel glass is inverted: the firmware sends INVON so pixels come out as sent.
++        let invert = !p.inverted;
++        let dark = !p.on || p.sleeping;
++        for y in 0..LCD_H {
++            for x in 0..LCD_W {
++                let px = if dark { 0 } else {
++                    let v = p.gram[(40 + x) * p.cols + (186 - y)];
++                    if invert { !v } else { v }
++                };
++                out[y * LCD_W + x] = px;
++            }
++        }
++        out
++    }
++
++    /// The TERM512 panel, 320x240, read back through the MADCTL the firmware set: the firmware
++    /// chooses MADCTL so that its app coordinates are upright on the glass.
++    pub fn ext_frame(&self) -> (usize, usize, Vec<u16>) {
++        let p = &self.ext.dcs;
++        let mv = p.madctl & 0x20 != 0;
++        let (w, h) = if mv { (p.rows, p.cols) } else { (p.cols, p.rows) };
++        let mut out = vec![0u16; w * h];
++        for y in 0..h {
++            for x in 0..w {
++                let (mut col, mut row) = if mv { (y, x) } else { (x, y) };
++                if p.madctl & 0x40 != 0 { col = p.cols - 1 - col; }
++                if p.madctl & 0x80 != 0 { row = p.rows - 1 - row; }
++                let v = p.gram[row * p.cols + col];
++                out[y * w + x] = if p.inverted { !v } else { v };
++            }
++        }
++        (w, h, out)
++    }
++}
++
++impl BoardModel for CardputerAdv {
++    fn name(&self) -> &'static str { "cardputer-adv" }
++
++    fn gpio_changes(&mut self, changes: &[(u8, bool)]) {
++        for &(pin, level) in changes {
++            self.gpio_events += 1;
++            match pin {
++                LCD_DC => self.lcd.dcs.dc = level,
++                LCD_RST => { self.lcd.in_reset = !level; if !level { self.lcd.dcs.reset(); } }
++                LCD_BL => self.backlight = level,
++                EXT_DC => self.ext.dcs.dc = level,
++                EXT_RST => { self.ext.in_reset = !level; if !level { self.ext.dcs.reset(); } }
++                SD_CS if level => { self.sd.deselect(); self.sd_selected = false; }
++                _ => {}
++            }
++        }
++    }
++
++    fn uses_spi_pins(&self) -> bool { true }
++
++    fn spi_transfer_pins(&mut self, _host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
++        let cs = |pin: u8| pins.cs & (1u64 << pin) != 0;
++        if cs(LCD_CS) { return self.lcd.transfer(tx, rx_len); }
++        if cs(EXT_CS) { return self.ext.transfer(tx, rx_len); }
++        if cs(SD_CS) {
++            self.sd_selected = true;
++            // Full duplex: MISO byte i is clocked out while MOSI byte i goes in. A read-only
++            // phase longer than the write side clocks 0xff, the idle MOSI level.
++            let n = tx.len().max(rx_len);
++            let rx: Vec<u8> = (0..n).map(|i| self.sd.exchange(tx.get(i).copied().unwrap_or(0xff))).collect();
++            // A half-duplex read follows the written bytes on the wire.
++            return if rx_len != 0 && rx_len < n { rx[n - rx_len..].to_vec() } else { rx };
++        }
++        // Nothing selected: the card's clock-out before CMD0 (CS high) and anything else.
++        if self.sd_selected { self.sd.deselect(); self.sd_selected = false; }
++        vec![0xff; rx_len]
++    }
++
++    fn i2c_devices(&mut self) -> Vec<(u8, u8, Box<dyn I2cDevice>)> {
++        // Pinned to SDA 8 / SCL 9: whichever controller the firmware routes there finds it.
++        (0..2).map(|bus| (bus, KBD_ADDR, Box::new(Tca8418 { state: self.kbd.clone(), ptr: 0, first: true }) as Box<dyn I2cDevice>)).collect()
++    }
++
++    fn input_levels(&self) -> Vec<(u8, bool)> {
++        // GPIO 8/9 high (I2C pull-ups: the ADV), 5/6 low (nothing there), G0 released,
++        // keypad INT idle high.
++        vec![(KBD_SDA, true), (KBD_SCL, true), (5, false), (6, false), (BTN_G0, true), (KBD_INT, true), (SD_MISO, true)]
++    }
++
++    fn key_event(&mut self, code: u8, down: bool) { self.kbd.lock().unwrap().key(code, down); }
++
++    fn set_sd_image(&mut self, image: Vec<u8>) { self.sd = SdCard::new(image); self.sd_selected = false; }
++    fn sd_image(&self) -> Option<&[u8]> { self.sd.is_present().then(|| self.sd.image()) }
++    fn sd_generation(&self) -> u64 { self.sd.write_generation }
++
++    fn gpio_events(&self) -> u64 { self.gpio_events }
++    fn named_pin(&self, name: &str) -> Option<u8> { match name { "g0" | "btn1" | "boot" => Some(BTN_G0), _ => None } }
++
++    fn display(&self) -> Option<(u32, u32, Vec<u16>, u64)> {
++        Some((LCD_W as u32, LCD_H as u32, self.lcd_frame(), self.display_version()))
++    }
++    fn display_version(&self) -> u64 {
++        let p = &self.lcd.dcs;
++        p.pixels_written + p.resets * 7 + u64::from(p.on) * 3 + u64::from(p.sleeping) * 5 + u64::from(p.inverted)
++    }
++    fn display_frames(&self) -> u64 { self.lcd.dcs.frames }
++    fn display_quiet_push(&self) -> bool { true }
++    fn display_aux(&self) -> Option<(u32, u32, Vec<u16>, u64)> {
++        if self.ext.dcs.pixels_written == 0 { return None; }
++        let (w, h, px) = self.ext_frame();
++        Some((w as u32, h as u32, px, self.ext.dcs.pixels_written))
++    }
++    fn display_aux_version(&self) -> u64 { self.ext.dcs.pixels_written }
++    fn gram(&self) -> Option<(Vec<u16>, usize, usize)> { Some((self.lcd.dcs.gram.clone(), self.lcd.dcs.cols, self.lcd.dcs.rows)) }
++
++    fn report(&self) -> String {
++        let k = self.kbd.lock().unwrap();
++        format!("[emu] lcd: {} RAMWR, {} pixels, madctl={:#x} inv={} on={}; ext: {} pixels\n[emu] sd: {} sectors, {} commands, {} blocks read, {} written, {} crc errors\n[emu] keyboard: {} events, cfg={:#x}",
++                self.lcd.dcs.frames, self.lcd.dcs.pixels_written, self.lcd.dcs.madctl, self.lcd.dcs.inverted, self.lcd.dcs.on,
++                self.ext.dcs.pixels_written, self.sd.sectors(), self.sd.commands, self.sd.blocks_read, self.sd.blocks_written, self.sd.crc_errors,
++                k.events, k.regs[1])
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn keypad_fifo_pops_and_flags_interrupt() {
++        let mut st = Tca8418State::default();
++        assert_eq!(st.read(0x02) & 1, 0);
++        st.key(13, true);
++        st.key(13, false);
++        assert_eq!(st.read(0x02) & 1, 1);
++        assert_eq!(st.read(0x03) & 0x0f, 2);
++        assert_eq!(st.read(0x04), 0x80 | 13);
++        assert_eq!(st.read(0x04), 13);
++        assert_eq!(st.read(0x04), 0);
++    }
++
++    #[test]
++    fn panel_answers_rddid() {
++        let mut b = CardputerAdv::new();
++        b.gpio_changes(&[(LCD_DC, false)]);
++        let pins = SpiPins { cs: 1 << LCD_CS, ..Default::default() };
++        b.spi_transfer_pins(2, pins, &[0x04], 0);
++        let id = b.spi_transfer_pins(2, pins, &[], 4);
++        assert_eq!(id[0] & 0xfb, 0x81);
++    }
++}
+diff --git a/esp32s3/src/board/mod.rs b/esp32s3/src/board/mod.rs
+index 32162216..855bda67 100644
+--- a/esp32s3/src/board/mod.rs
++++ b/esp32s3/src/board/mod.rs
+@@ -11,11 +11,13 @@
+ pub use esp_soc::board::{Board, BoardEdge, BoardModel, NoBoard, VirtualCycle};
+ 
+ pub mod atech14;
++pub mod cardputer_adv;
+ pub mod waveshare_amoled18;
+ pub mod waveshare_cam;
+ pub mod waveshare_lcd4b;
+ 
+ pub use atech14::*;
++pub use cardputer_adv::CardputerAdv;
+ pub use waveshare_amoled18::*;
+ pub use waveshare_cam::*;
+ pub use waveshare_lcd4b::*;
+@@ -24,6 +26,7 @@ pub use waveshare_lcd4b::*;
+ pub fn make_board(name: &str) -> Option<Board> {
+     match name {
+         "atech14" | "atech" => Some(Box::new(Atech14::new())),
++        "cardputer-adv" | "cardputer" => Some(Box::new(CardputerAdv::new())),
+         "none" | "bare" => Some(Box::new(NoBoard)),
+         "waveshare-cam" | "waveshare" => Some(Box::new(WaveshareCam::new())),
+         "waveshare-lcd4b" | "lcd4b" => Some(Box::new(WaveshareLcd4b::new())),
+diff --git a/esp32s3/src/bus.rs b/esp32s3/src/bus.rs
+index 93d86704..7c396e6a 100644
+--- a/esp32s3/src/bus.rs
++++ b/esp32s3/src/bus.rs
+@@ -60,6 +60,12 @@ pub struct SocBus {
+     pub spi2_timing: bool,
+     spi2_scheduled: Option<(u64, Spi2DmaCompletion)>,
+     spi2_pins: Option<esp_soc::board::SpiPins>,
++    spi3_pins: Option<esp_soc::board::SpiPins>,
++    /// Spin skip bookkeeping: the executing core, whether it raised its own FROM_CPU yield,
++    /// and whether it touched any other device register, since the machine last asked.
++    pub(crate) spin_core: usize,
++    pub(crate) spin_yield: bool,
++    pub(crate) spin_io: bool,
+     /// set by any peripheral write: interrupt lines must be re-evaluated before the next instruction
+     pub irq_dirty: bool,
+     /// GPIO edges for observers, while one wants them: (cycle, pin, level)
+@@ -138,7 +144,7 @@ fn tlb_idx(addr: u32) -> usize { xtensa_lx7::bus::tlb_index(addr) }
+ static BUS_EPOCHS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+ 
+ impl SocBus {
+-    pub(crate) fn cancel_spi2_timing(&mut self) { self.spi2_scheduled = None; self.spi2_pins = None; }
++    pub(crate) fn cancel_spi2_timing(&mut self) { self.spi2_scheduled = None; self.spi2_pins = None; self.spi3_pins = None; }
+ 
+     pub fn new(flash_size: usize, psram_size: usize, mac: [u8; 6]) -> Self { Self::with_sizes(flash_size, psram_size, mac) }
+     pub fn with_sizes(flash_size: usize, psram_size: usize, mac: [u8; 6]) -> Self {
+@@ -146,7 +152,7 @@ impl SocBus {
+             sram: vec![0; SRAM_SIZE], irom: vec![0; (IROM_MASK_HIGH - IROM_MASK_LOW) as usize], drom: vec![0; (DROM_MASK_HIGH - DROM_MASK_LOW) as usize],
+             rtc_fast: vec![0; 8192], rtc_slow: vec![0; 8192], flash: vec![0xff; flash_size], psram: vec![0; psram_size],
+             mmu: [MMU_INVALID; MMU_ENTRIES], periph: Peripherals::new(mac), board: Box::new(crate::board::Atech14::new()), uart_pins: false, cycles: 0, last_fault: None, spi2_dma_fault: None, irq_dirty: false, gpio_events: None, debug: Default::default(),
+-            spi2_timing: false, spi2_scheduled: None, spi2_pins: None,
++            spi2_timing: false, spi2_scheduled: None, spi2_pins: None, spi3_pins: None, spin_core: 0, spin_yield: false, spin_io: false,
+             tlb: vec![TlbEntry::EMPTY; TLB_SIZE], page_ver: Vec::new(), ver_base: [0; 7], flash_epoch: BUS_EPOCHS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) << 32, code_blk: Vec::new(), tick_pending: 0, tick_budget: 0, defer_mmio: false, mmio_deferred: false, vq_violations: 0,
+             approximate_cache: None, approximate_cache_pending: 0, approximate_cache_fast_internal: false, approximate_cache_inline: false,
+             approximate_cache_yield_miss: false,
+@@ -429,6 +435,7 @@ impl SocBus {
+         }
+         self.vq_backstop(addr);
+         self.flush_ticks();                                         // registers must show exact time
++        if !Self::is_sw_int_reg(addr) { self.spin_io = true; }
+         self.periph.read32(addr)
+     }
+     /// EX133: every device-register access must have been deferred out of a multi-quantum run.
+@@ -437,7 +444,13 @@ impl SocBus {
+     fn vq_backstop(&mut self, addr: u32) {
+         if self.defer_mmio { assert!(option_env!("ESP32SIM_VQ_STRICT").is_none(), "EX133: undeferred device access at {addr:#x}"); self.vq_violations += 1; if self.vq_violations == 1 { eprintln!("[emu] EX133: undeferred device access at {addr:#x}, pc {:#x}", self.periph.misc.cur_pc); } }
+     }
++    /// SYSTEM_CPU_INTR_FROM_CPU_0..3: the software interrupts FreeRTOS yields with.
++    #[inline]
++    fn is_sw_int_reg(addr: u32) -> bool { (0x600c_0030..0x600c_0040).contains(&(addr & !3)) }
+     fn periph_write(&mut self, addr: u32, v: u32) {
++        if Self::is_sw_int_reg(addr) {
++            if v & 1 != 0 && ((addr & 0xf) >> 2) as usize == self.spin_core { self.spin_yield = true; }
++        } else { self.spin_io = true; }
+         self.vq_backstop(addr);
+         self.periph_write_inner(addr, v);
+         self.refresh_tick_budget();   // the write may have armed something
+@@ -452,9 +465,9 @@ impl SocBus {
+         let a = addr & !3;
+         // mmio-s1: SPI2 and GDMA writes reach only those two devices' sources (and RAM, the board),
+         // so they re-derive interrupt lines only when one of those sources moved.
+-        let spi = matches!(a >> 12, 0x60024 | 0x6003f);
+-        let sources = |p: &Peripherals| (p.spi2.irq(), esp_periph::Device::irq_sources(&p.gdma));
+-        let before = if spi { sources(&self.periph) } else { (false, 0) };
++        let spi = matches!(a >> 12, 0x60024 | 0x60025 | 0x6003f);
++        let sources = |p: &Peripherals| (p.spi2.irq() as u8 | (p.spi3.irq() as u8) << 1, esp_periph::Device::irq_sources(&p.gdma));
++        let before = if spi { sources(&self.periph) } else { (0, 0) };
+         if a == PERIPH_BASE + 0x24_000 && v & (1 << 24) != 0 {
+             self.spi2_dma_fault = None;
+             self.spi2_scheduled = None;
+@@ -482,6 +495,9 @@ impl SocBus {
+         if a == PERIPH_BASE + 0x24_000 && v & (1 << 24) != 0 && !self.periph.spi2.has_pending_transfer() {
+             self.spi2_pins = self.board.uses_spi_pins().then(|| self.periph.spi2_pins());
+         }
++        if a == PERIPH_BASE + 0x25_000 && v & (1 << 24) != 0 && !self.periph.spi3.has_pending_transfer() {
++            self.spi3_pins = self.board.uses_spi_pins().then(|| self.periph.spi3_pins());
++        }
+         self.periph.write32(a, v);
+         if old_gpio_out != self.periph.gpio.out || old_gpio_enable != self.periph.gpio.enable {
+             let changes = &self.periph.gpio.changes;
+@@ -496,6 +512,7 @@ impl SocBus {
+         }
+         self.complete_spi2_dma();
+         self.deliver_spi2_transfer();
++        self.deliver_spi3_transfer();
+         // GPIO output writes usually only drive the board, but an enabled level
+         // interrupt also observes output levels. Inspect only changed output pins.
+         if spi {
+@@ -792,6 +809,7 @@ impl SocBus {
+             || p.wifi.ap.is_some() || p.wifi.net.is_some() || !p.wifi.tx_pending.is_empty()
+             || p.aes.dma_pending || p.sha.dma_pending
+             || p.spi2.has_pending_transfer() || p.spi2.dma_tx_pending.is_some()
++            || p.spi3.has_pending_transfer() || p.spi3.dma_tx_pending.is_some()
+             || p.rmt.ch.iter().any(|c| c.running) || !p.rmt.done.is_empty()
+             || !p.gpio.changes.is_empty() || !p.gpio.input_changes.is_empty()
+             || p.rtc.ram.read(0x98) & (1 << 31) != 0
+@@ -845,6 +863,7 @@ impl SocBus {
+         }
+         self.complete_spi2_dma();
+         self.deliver_spi2_transfer();
++        self.deliver_spi3_transfer();
+         self.dma_i2s_step(cycles as u64);
+         self.dma_cam_step(cycles as u64);
+         self.dma_lcd_step(cycles as u64);
+diff --git a/esp32s3/src/bus/dma.rs b/esp32s3/src/bus/dma.rs
+index 11fc7c7a..6a046754 100644
+--- a/esp32s3/src/bus/dma.rs
++++ b/esp32s3/src/bus/dma.rs
+@@ -57,24 +57,31 @@ impl SocBus {
+         if let Some((deadline, _)) = &self.spi2_scheduled {
+             if self.cycles < *deadline { return; }
+             let (_, completion) = self.spi2_scheduled.take().unwrap();
+-            self.commit_spi2_dma(completion);
++            self.commit_spi_dma(2, completion);
+             return;
+         }
+-        if self.periph.spi2.dma_tx_pending.is_none() {
++        self.complete_gpspi_dma(2);
++    }
++
++    /// Collect a pending DMA-sourced MOSI phase for GP-SPI `host` (2 or 3). Only SPI2 has the
++    /// experimental wire-time scheduling; SPI3 always completes in the same round.
++    pub(super) fn complete_gpspi_dma(&mut self, host: u8) {
++        if self.periph.gpspi(host).dma_tx_pending.is_none() {
+             return;
+         }
+-        let channel = self.periph.gdma.out_channel_for(0);
+-        if channel.is_none() && !self.periph.gdma.out.iter().any(|c| c.peri_sel == 0 && c.desc != 0) {
++        let peri = u32::from(host - 2);                                   // GDMA_TRIG_PERIPH_SPI2 = 0, SPI3 = 1
++        let channel = self.periph.gdma.out_channel_for(peri);
++        if channel.is_none() && !self.periph.gdma.out.iter().any(|c| c.peri_sel == peri && c.desc != 0) {
+             // A DMA command without a bound channel cannot progress. Abort it just
+             // like a descriptor failure so firmware can issue a later CPU command.
+             // A stopped channel with a descriptor remains bound and can be restarted.
+-            self.periph.spi2.fail_dma_tx();
++            self.periph.gpspi(host).fail_dma_tx();
+             self.irq_dirty = true;
+             return;
+         }
+-        match self.spi2_dma_completion() {
++        match self.spi_dma_completion(host) {
+             Ok(Some(completion)) => {
+-                if self.spi2_timing {
++                if host == 2 && self.spi2_timing {
+                     // Rough wire-time floor, assuming the normal 80 MHz SPI source.
+                     // Payload is snapshotted at submission; no progressive SRAM reads yet.
+                     let cycles = self.periph.spi2.wire_source_cycles() * (crate::periph::CPU_HZ / 80_000_000);
+@@ -83,22 +90,22 @@ impl SocBus {
+                     // device's register (mmio-s1 compares only SPI2/GDMA sources; review blocker).
+                     self.irq_dirty = true;
+                 } else {
+-                    self.commit_spi2_dma(completion);
++                    self.commit_spi_dma(host, completion);
+                 }
+             }
+             Ok(None) => {}
+             Err(fault) => {
+                 if let Some(channel) = channel {
+-                    self.fail_spi2_dma(channel, fault);
++                    self.fail_spi_dma(host, channel, fault);
+                 }
+             }
+         }
+     }
+ 
+-    fn commit_spi2_dma(&mut self, completion: Spi2DmaCompletion) {
++    fn commit_spi_dma(&mut self, host: u8, completion: Spi2DmaCompletion) {
+         for (descriptor, control) in completion.descriptor_writebacks {
+             if let Err(fault) = self.write32_unpriced(descriptor, control) {
+-                self.fail_spi2_dma(completion.channel, DmaDescriptorFault::Writeback { descriptor, fault });
++                self.fail_spi_dma(host, completion.channel, DmaDescriptorFault::Writeback { descriptor, fault });
+                 return;
+             }
+         }
+@@ -112,25 +119,31 @@ impl SocBus {
+         channel.running = channel.running && completion.running;
+         if let Some(descriptor) = completion.eof_desc { channel.eof_desc = descriptor; }
+         channel.int_raw |= completion.raised_interrupts;
+-        self.periph.spi2.complete_dma_tx(&completion.payload);
++        self.periph.gpspi(host).complete_dma_tx(&completion.payload);
+         self.irq_dirty = true;
+     }
+ 
+-    fn fail_spi2_dma(&mut self, channel: usize, fault: DmaDescriptorFault) {
+-        if self.periph.spi2.log { eprintln!("[spi2] DMA descriptor fault: {fault:?}"); }
+-        self.spi2_dma_fault = Some(fault);
++    fn fail_spi_dma(&mut self, host: u8, channel: usize, fault: DmaDescriptorFault) {
++        if self.periph.gpspi(host).log { eprintln!("[spi{host}] DMA descriptor fault: {fault:?}"); }
++        if host == 2 { self.spi2_dma_fault = Some(fault); }
+         let gdma = &mut self.periph.gdma.out[channel];
+         gdma.running = false;
+         gdma.int_raw |= 1 << 2;                                         // OUT_DSCR_ERR
+-        self.periph.spi2.fail_dma_tx();
++        self.periph.gpspi(host).fail_dma_tx();
+         self.irq_dirty = true;
+     }
+ 
+-    pub(super) fn deliver_spi2_transfer(&mut self) {
+-        if self.periph.spi2.dma_tx_pending.is_some() {
++    pub(super) fn deliver_spi2_transfer(&mut self) { self.deliver_gpspi_transfer(2); }
++    pub(super) fn deliver_spi3_transfer(&mut self) {
++        self.complete_gpspi_dma(3);
++        self.deliver_gpspi_transfer(3);
++    }
++
++    fn deliver_gpspi_transfer(&mut self, host: u8) {
++        if self.periph.gpspi(host).dma_tx_pending.is_some() {
+             return;
+         }
+-        let Some(transfer) = self.periph.spi2.take_transfer() else { return };
++        let Some(transfer) = self.periph.gpspi(host).take_transfer() else { return };
+         // Chip select and command/data lines are GPIOs. The board must see their preceding edges
+         // before it receives the transaction.
+         if !self.periph.gpio.changes.is_empty() {
+@@ -143,19 +156,31 @@ impl SocBus {
+             self.board.gpio_output_at(self.cycles, changes, self.periph.gpio.enable, self.periph.gpio.out);
+             self.periph.gpio.changes.clear();
+         }
+-        let rx = if let Some(pins) = self.spi2_pins.take() {
+-            self.board.spi_transfer_pins(2, pins, &transfer.tx, transfer.rx_len)
++        let pins = if host == 3 { self.spi3_pins.take() } else { self.spi2_pins.take() };
++        let rx = if let Some(pins) = pins {
++            self.board.spi_transfer_pins(host, pins, &transfer.tx, transfer.rx_len)
+         } else {
+-            self.board.spi_transfer(2, &transfer.tx, transfer.rx_len)
++            self.board.spi_transfer(host, &transfer.tx, transfer.rx_len)
+         };
+-        self.periph.spi2.finish_transfer(transfer, &rx);
++        if transfer.rx_dma {
++            // MISO data by DMA: scatter it through the IN channel bound to this host. The
++            // transfer still completes (TRANS_DONE) if no channel is armed, as on silicon where
++            // the bytes would simply be lost.
++            let mut data = rx.clone();
++            data.resize(transfer.rx_len, 0xff);
++            if let Some(ch) = self.periph.gdma.in_channel_for(u32::from(host - 2)) {
++                if self.scatter_dma_in(ch, &data).is_err() { self.fail_dma_in(ch); }
++            }
++        }
++        self.periph.gpspi(host).finish_transfer(transfer, &rx);
++        self.irq_dirty = true;
+     }
+ 
+     /// Collect one GP-SPI2 data phase and its GDMA completion without partially committing a
+     /// malformed descriptor chain.
+-    fn spi2_dma_completion(&mut self) -> Result<Option<Spi2DmaCompletion>, DmaDescriptorFault> {
+-        let Some(bits) = self.periph.spi2.dma_tx_pending else { return Ok(None) };
+-        let Some(channel_index) = self.periph.gdma.out_channel_for(0) else { return Ok(None) };
++    fn spi_dma_completion(&mut self, host: u8) -> Result<Option<Spi2DmaCompletion>, DmaDescriptorFault> {
++        let Some(bits) = self.periph.gpspi(host).dma_tx_pending else { return Ok(None) };
++        let Some(channel_index) = self.periph.gdma.out_channel_for(u32::from(host - 2)) else { return Ok(None) };
+         let wanted = (bits as usize).div_ceil(8);
+         let mut payload = Vec::with_capacity(wanted);
+         let mut visited = HashSet::new();
+diff --git a/esp32s3/src/bus/pins.rs b/esp32s3/src/bus/pins.rs
+index 697bc2b9..ff73ba32 100644
+--- a/esp32s3/src/bus/pins.rs
++++ b/esp32s3/src/bus/pins.rs
+@@ -6,4 +6,10 @@ impl Peripherals {
+     pub(crate) fn spi2_pins(&self) -> SpiPins {
+         ChipPins::S3.routes(&self.gpio, &self.io_mux).spi_pins(&self.spi2, [101, 102, 103, 110], 256, &[(4, 12, 11, 13, 10), (2, 36, 35, 37, 34)])
+     }
++    /// GP-SPI3 has no IO_MUX pins of its own; it reaches pads only through the GPIO matrix
++    /// (ESP-IDF v5.5 components/soc/esp32s3/include/soc/gpio_sig_map.h: SPI3_CLK 66, SPI3_Q 67,
++    /// SPI3_D 68, SPI3_CS0 71).
++    pub(crate) fn spi3_pins(&self) -> SpiPins {
++        ChipPins::S3.routes(&self.gpio, &self.io_mux).spi_pins(&self.spi3, [66, 67, 68, 71], 256, &[])
++    }
+ }
+diff --git a/esp32s3/src/periph.rs b/esp32s3/src/periph.rs
+index 3c99a460..e763ba01 100644
+--- a/esp32s3/src/periph.rs
++++ b/esp32s3/src/periph.rs
+@@ -17,6 +17,7 @@ pub const SRC_UART0: usize = 27;
+ pub const SRC_UART1: usize = 28;
+ pub const SRC_UART2: usize = 29;
+ pub const SRC_SPI2: usize = 21;
++pub const SRC_SPI3: usize = 22;
+ pub const SRC_PCNT: usize = 41;
+ pub const SRC_AES: usize = 77;
+ pub const SRC_LCD_CAM: usize = 24;
+@@ -394,6 +395,7 @@ pub struct Peripherals {
+     pub i2c: [crate::i2c::I2c; 2],
+     pub lcd_cam: LcdCam,
+     pub spi2: GpSpi,
++    pub spi3: GpSpi,
+     pub pcnt: Pcnt,
+     pub wifi: WifiMac,
+     pub fe: FeIq,
+@@ -447,6 +449,7 @@ device_set! { Peripherals; clock: (clock) CPU_HZ, [(ClockDomain::Systimer, 15),
+     0x27 "I2C1" (i2c[1]) => [SRC_I2C1];
+     0x41 "LCD_CAM" (lcd_cam) => [SRC_LCD_CAM];
+     0x24 "SPI2" (spi2) => [SRC_SPI2];
++    0x25 "SPI3" (spi3) => [SRC_SPI3];
+     0x17 "PCNT" (pcnt) => [SRC_PCNT];
+     0x33 "WIFI_MAC" (wifi) => [SRC_WIFI_MAC];
+     0x34 "WIFI_MAC" alias (wifi) delta 0x1000 => [];
+@@ -483,7 +486,7 @@ impl Peripherals {
+             usb: UsbSerialJtag::new(CPU_HZ), uart: [Uart::new(UartLayout::S3), Uart::new(UartLayout::S3), Uart::new(UartLayout::S3)], systimer: Systimer::new(),
+             timg: [TimerGroup::new(), TimerGroup::new()], intmatrix: IntMatrix::new(), gpio: Gpio::new(), rtc: RtcCntl::new(),
+             efuse: Efuse::new(mac), system: SystemRegs::new(0x30), extmem: Extmem::new(), spi0: SpiMem::new(false), spi1: SpiMem::new(true),
+-            i2c: [crate::i2c::I2c::new(), crate::i2c::I2c::new()], lcd_cam: LcdCam::new(), spi2: GpSpi::new(), pcnt: Pcnt::new(), wifi: WifiMac::new(), fe: FeIq { word: 0, done: false },
++            i2c: [crate::i2c::I2c::new(), crate::i2c::I2c::new()], lcd_cam: LcdCam::new(), spi2: GpSpi::new(), spi3: GpSpi::new(), pcnt: Pcnt::new(), wifi: WifiMac::new(), fe: FeIq { word: 0, done: false },
+             aes: Aes::new(), rsa: Rsa::new(), sha: Sha::new(), wdev: Wdev::new(), i2c_mst: I2cMst::new(), gdma: Gdma::new(), i2s0: I2s::new(CPU_HZ), i2s1: I2s::new(CPU_HZ), rmt: Rmt::new(CPU_HZ),
+             io_mux: RegRam::new(), misc: Misc::new(), fake_reads: std::env::var("ESP_EMU_FAKE_READ").ok().map(|v| v.split(',').filter_map(|e| { let mut p = e.split(':'); let a = u32::from_str_radix(p.next()?.trim_start_matches("0x"), 16).ok()?; let o = u32::from_str_radix(p.next().unwrap_or("0").trim_start_matches("0x"), 16).ok()?; let m = u32::from_str_radix(p.next().unwrap_or("ffffffff").trim_start_matches("0x"), 16).ok()?; Some((a, (o, m))) }).collect()).unwrap_or_default(),
+             clock: Self::new_clock(),
+@@ -611,6 +614,8 @@ impl Peripherals {
+         }
+         lines
+     }
++    /// GP-SPI host 2 or 3.
++    pub fn gpspi(&mut self, host: u8) -> &mut GpSpi { if host == 3 { &mut self.spi3 } else { &mut self.spi2 } }
+     /// SYSTEM_CORE_1_CONTROL_0: (clkgate_en, reseting, runstall)
+     pub fn core1_control(&self) -> (bool, bool, bool) { let v = self.system.ram.read(0); (v & 2 != 0, v & 4 != 0, v & 1 != 0) }
+ }
+diff --git a/esp32s3/src/soc.rs b/esp32s3/src/soc.rs
+index 78083c9e..8b7724bd 100644
+--- a/esp32s3/src/soc.rs
++++ b/esp32s3/src/soc.rs
+@@ -55,6 +55,16 @@ impl esp_soc::SocBus for SocBus {
+     // `ESP32SIM_VQ_NATIVE` opts a native run in; it is only sound with `--no-jit`.
+     fn can_defer(&self) -> bool { cfg!(target_arch = "wasm32") || std::env::var_os("ESP32SIM_VQ_NATIVE").is_some() }
+     fn set_defer(&mut self, on: bool) { self.defer_mmio = on; self.mmio_deferred = false; }
++    fn set_current_core(&mut self, core: usize) { self.spin_core = core; }
++    fn take_spin_activity(&mut self) -> (bool, bool) { (std::mem::take(&mut self.spin_yield), std::mem::take(&mut self.spin_io)) }
++    fn defer_self_yield(&mut self, core: usize) -> bool {
++        let bit = 1 << core;
++        if self.periph.system.sw_int & bit == 0 { return false; }
++        self.periph.system.sw_int &= !bit;
++        self.irq_dirty = true;
++        true
++    }
++    fn restore_self_yield(&mut self, core: usize) { self.periph.system.sw_int |= 1 << core; self.irq_dirty = true; }
+     fn take_deferred(&mut self) -> bool { std::mem::take(&mut self.mmio_deferred) }
+     fn refresh_irq(&mut self) -> bool {
+         // Inputs are sampled at refresh boundaries. Clearing and reasserting a source
+diff --git a/wasm/src/lib.rs b/wasm/src/lib.rs
+index c0390234..b73f96cc 100644
+--- a/wasm/src/lib.rs
++++ b/wasm/src/lib.rs
+@@ -286,6 +286,57 @@ pub unsafe extern "C" fn esp32sim_run(e: *mut Emu, cycles: u32, unix_ms: f64) ->
+     e.m.run_slice(cycles)
+ }
+ 
++/// Spin skip: park a core that keeps yielding to itself without device access until its next
++/// interrupt (`Machine::set_spin_skip`). Off by default.
++///
++/// # Safety
++/// `e` must point to a live emulator to which the caller has exclusive access.
++#[no_mangle]
++pub unsafe extern "C" fn esp32sim_set_spin_skip(e: *mut Emu, on: u32) {
++    // SAFETY: The caller provides exclusive access to a live emulator.
++    unsafe { &mut *e }.m.set_spin_skip(on != 0);
++}
++
++/// A key of the board's keyboard went down (`down` = 1) or up. `code` is the board's key number:
++/// on `cardputer-adv`, the TCA8418 key event code.
++///
++/// # Safety
++/// `e` must point to a live emulator to which the caller has exclusive access.
++#[no_mangle]
++pub unsafe extern "C" fn esp32sim_key(e: *mut Emu, code: u32, down: u32) {
++    // SAFETY: The caller provides exclusive access to a live emulator.
++    unsafe { &mut *e }.m.key_event(code as u8, down != 0);
++}
++
++/// The memory card's contents (null when there is no card): valid until the next call that runs
++/// the machine. Copy it out with `esp32sim_sd_len` bytes.
++///
++/// # Safety
++/// `e` must point to a live emulator, and no mutable access may overlap this call.
++#[no_mangle]
++pub unsafe extern "C" fn esp32sim_sd_ptr(e: *mut Emu) -> *const u8 {
++    // SAFETY: The caller provides shared access to a live emulator without overlapping mutation.
++    unsafe { &*e }.m.sd_image().map_or(std::ptr::null(), |d| d.as_ptr())
++}
++/// Length of the memory card image, 0 when there is no card.
++///
++/// # Safety
++/// `e` must point to a live emulator, and no mutable access may overlap this call.
++#[no_mangle]
++pub unsafe extern "C" fn esp32sim_sd_len(e: *mut Emu) -> usize {
++    // SAFETY: The caller provides shared access to a live emulator without overlapping mutation.
++    unsafe { &*e }.m.sd_image().map_or(0, |d| d.len())
++}
++/// Blocks written to the memory card so far: changes whenever the card's contents do.
++///
++/// # Safety
++/// `e` must point to a live emulator, and no mutable access may overlap this call.
++#[no_mangle]
++pub unsafe extern "C" fn esp32sim_sd_generation(e: *mut Emu) -> f64 {
++    // SAFETY: The caller provides shared access to a live emulator without overlapping mutation.
++    unsafe { &*e }.m.sd_generation() as f64
++}
++
+ /// The emulated CPU clock, so the driver paces the right chip: 240 MHz on the S3, 160 on the C3.
+ ///
+ /// # Safety
+diff --git a/wasm/src/machine.rs b/wasm/src/machine.rs
+index 882601d7..d3571de1 100644
+--- a/wasm/src/machine.rs
++++ b/wasm/src/machine.rs
+@@ -20,6 +20,10 @@ pub(super) trait MachineApi {
+     fn reports(&mut self) -> String;
+     fn set_jit(&mut self, enabled: bool);
+     fn approximate_jit_timing(&mut self, cpi: u32, quantum: u32) -> u32;
++    fn key_event(&mut self, code: u8, down: bool);
++    fn set_spin_skip(&mut self, on: bool);
++    fn sd_image(&self) -> Option<&[u8]>;
++    fn sd_generation(&self) -> u64;
+ }
+ 
+ impl<S: Soc> MachineApi for Machine<S> {
+@@ -68,6 +72,10 @@ impl<S: Soc> MachineApi for Machine<S> {
+     fn approximate_jit_timing(&mut self, cpi: u32, quantum: u32) -> u32 {
+         match self.set_approximate_jit_timing(cpi, quantum) { Ok(()) => 0, Err(reason) => { log(&reason); 1 } }
+     }
++    fn set_spin_skip(&mut self, on: bool) { Machine::set_spin_skip(self, on); }
++    fn key_event(&mut self, code: u8, down: bool) { self.bus.board().key_event(code, down); *self.bus.irq_dirty() = true; }
++    fn sd_image(&self) -> Option<&[u8]> { self.bus.board_ref().sd_image() }
++    fn sd_generation(&self) -> u64 { self.bus.board_ref().sd_generation() }
+     fn set_jit(&mut self, enabled: bool) { for core in &mut self.cores { xtensa_lx7::Core::set_jit(core, enabled); } }
+ }
+ 
+diff --git a/xtensa-lx7/src/core.rs b/xtensa-lx7/src/core.rs
+index 5654275e..5dabc741 100644
+--- a/xtensa-lx7/src/core.rs
++++ b/xtensa-lx7/src/core.rs
+@@ -16,6 +16,7 @@ impl emu_core::Core for Cpu {
+     fn pc(&self) -> u32 { self.pc }
+     fn set_pc(&mut self, pc: u32) { self.pc = pc; }
+     fn waiting(&self) -> bool { self.waiting }
++    fn park(&mut self) { self.waiting = true; }
+     fn insn_count(&self) -> u64 { self.insn_count }
+     fn set_irq(&mut self, lines: u32) {
+         let rising = lines & !self.ext_irq_lines & (INTTYPE_EDGE | INTTYPE_NMI);
+-- 
+2.43.0
+

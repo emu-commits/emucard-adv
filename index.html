@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#151618">
+<meta name="description" content="A Cardputer ADV emulator running AREA512 firmware in the browser, with a working microSD card.">
+<title>Cardputer ADV Emulator</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="src/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>Cardputer ADV <span>emulator</span></h1>
+  <div class="controls">
+    <select id="firmware" title="Firmware" aria-label="Firmware">
+      <option value="Area512Adv.bin">AREA512 &middot; Cardputer ADV</option>
+      <option value="Area512TFT7789.bin">AREA512 &middot; ADV + TERM512 (ST7789)</option>
+      <option value="Area512TFT9341.bin">AREA512 &middot; ADV + TERM512 (ILI9341)</option>
+      <option value="local">Load a .bin file&hellip;</option>
+    </select>
+    <input type="file" id="firmware-file" accept=".bin,application/octet-stream" hidden>
+    <button id="btn-reset" title="Power cycle the device">Reset</button>
+    <button id="btn-sd" title="Browse and change the microSD card">SD card</button>
+    <button id="btn-menu" title="More" aria-haspopup="menu" aria-expanded="false">&#8942;</button>
+  </div>
+  <div id="menu" class="menu" role="menu" hidden>
+    <label class="menu-item"><input type="checkbox" id="opt-fast" checked> Skip busy-wait loops (faster)</label>
+    <label class="menu-item"><input type="checkbox" id="opt-console"> Show serial console</label>
+    <button class="menu-item" id="btn-shot">Save screenshot</button>
+    <button class="menu-item" id="btn-help">Keyboard help</button>
+  </div>
+</header>
+
+<main id="stage">
+  <section id="lid" class="lid" hidden aria-label="TERM512 external display">
+    <div class="lid-bezel"><canvas id="ext" width="320" height="240"></canvas></div>
+    <div class="lid-label">TERM512</div>
+  </section>
+
+  <section class="device" aria-label="Cardputer ADV">
+    <div class="device-top">
+      <div class="usb" aria-hidden="true"></div>
+      <div class="screen-bezel">
+        <canvas id="lcd" width="240" height="135" aria-label="Cardputer screen"></canvas>
+        <div id="overlay" class="overlay">Starting&hellip;</div>
+      </div>
+      <div class="side">
+        <div class="grille" aria-hidden="true"></div>
+        <button id="btn-g0" class="g0" title="G0 button (not wired in this emulator)" disabled>G0</button>
+        <div class="led" id="sd-led" title="microSD activity"></div>
+        <div class="brand">ADV</div>
+      </div>
+    </div>
+    <div id="keyboard" class="keyboard" role="group" aria-label="Cardputer keyboard"></div>
+  </section>
+
+  <p id="status" class="status" aria-live="polite"></p>
+
+  <details id="console-panel" class="console-panel" hidden>
+    <summary>Serial console (USB)</summary>
+    <pre id="console"></pre>
+  </details>
+</main>
+
+<dialog id="sd-dialog" class="sd-dialog">
+  <form method="dialog" class="sd-head">
+    <h2>microSD card</h2>
+    <span id="sd-usage" class="sd-usage"></span>
+    <button value="close" class="close" aria-label="Close">&times;</button>
+  </form>
+  <div class="sd-path">
+    <button id="sd-up" title="Up one folder">&uarr;</button>
+    <span id="sd-cwd">/</span>
+  </div>
+  <div id="sd-drop" class="sd-list" tabindex="0">
+    <table><tbody id="sd-entries"></tbody></table>
+    <div class="sd-hint">Drop files or folders here to copy them onto the card.</div>
+  </div>
+  <div class="sd-actions">
+    <button id="sd-add">Add files</button>
+    <button id="sd-add-dir">Add folder</button>
+    <button id="sd-mkdir">New folder</button>
+    <span class="spacer"></span>
+    <button id="sd-export">Download image</button>
+    <button id="sd-import">Use image&hellip;</button>
+    <button id="sd-format" class="danger">Format&hellip;</button>
+  </div>
+  <p class="sd-note" id="sd-note">The device is paused while the card is out. Changes are applied when you close this window, and the device restarts so the firmware sees them. AREA512 uses the card's <code>Area512_data</code> folder as its <code>/</code>.</p>
+  <input type="file" id="sd-files" multiple hidden>
+  <input type="file" id="sd-folder" webkitdirectory multiple hidden>
+  <input type="file" id="sd-image" accept=".img,.bin,.iso,application/octet-stream" hidden>
+</dialog>
+
+<dialog id="help-dialog" class="help-dialog">
+  <form method="dialog"><button class="close" aria-label="Close">&times;</button></form>
+  <h2>Keyboard</h2>
+  <p>Tap the keys, or type on a physical keyboard. The on-screen modifiers (<b>fn</b>, <b>aa</b> shift, <b>ctrl</b>, <b>opt</b>, <b>alt</b>) work like on the device: hold one with another finger, or tap it once to latch it for the next key.</p>
+  <table class="help-table">
+    <tr><th>Your keyboard</th><th>Cardputer</th></tr>
+    <tr><td>Letters, numbers, symbols</td><td>the matching key (Shift added when needed)</td></tr>
+    <tr><td>Arrow keys</td><td>fn + ; . , /</td></tr>
+    <tr><td>Esc</td><td>` (the firmware sends ESC)</td></tr>
+    <tr><td>`</td><td>fn + `</td></tr>
+    <tr><td>Ctrl + key</td><td>ctrl + key</td></tr>
+    <tr><td>Ctrl + Space</td><td>toggle the kana input method</td></tr>
+    <tr><td>Backspace / Delete</td><td>del</td></tr>
+    <tr><td>Enter</td><td>ok</td></tr>
+  </table>
+</dialog>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
