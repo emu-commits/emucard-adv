@@ -1,0 +1,13 @@
+{
+  "name": "emucard-adv",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cardputer ADV emulator for the browser, running AREA512 firmware with a working microSD card",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "smoke": "node tools/smoke.mjs",
+    "serve": "python3 -m http.server 8080",
+    "build:wasm": "tools/build-wasm.sh"
+  }
+}

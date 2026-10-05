@@ -1,0 +1,12 @@
+{
+  "name": "Cardputer ADV Emulator",
+  "short_name": "Cardputer",
+  "description": "Cardputer ADV emulator running AREA512 firmware, with a working microSD card",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#151618",
+  "theme_color": "#151618",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
