@@ -22,9 +22,9 @@
       <option value="Area512Adv.bin">AREA512 &middot; Cardputer ADV</option>
       <option value="Area512TFT7789.bin">AREA512 &middot; ADV + TERM512 (ST7789)</option>
       <option value="Area512TFT9341.bin">AREA512 &middot; ADV + TERM512 (ILI9341)</option>
-      <option value="local">Load a .bin file&hellip;</option>
     </select>
-    <input type="file" id="firmware-file" accept=".bin,application/octet-stream" hidden>
+    <button id="btn-load" title="Run your own firmware image from a .bin file">Load .bin</button>
+    <input type="file" id="firmware-file" accept=".bin,application/octet-stream,application/x-binary,*/*" hidden>
     <button id="btn-reset" title="Power cycle the device">Reset</button>
     <button id="btn-sd" title="Browse and change the microSD card">SD card</button>
     <button id="btn-menu" title="More" aria-haspopup="menu" aria-expanded="false">&#8942;</button>
