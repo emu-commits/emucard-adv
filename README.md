@@ -26,7 +26,8 @@ sets up the blank card; later boots are faster). Then:
 
 | | |
 | --- | --- |
-| Firmware menu | AREA512 for the Cardputer ADV, or the TERM512 builds (ST7789 / ILI9341 panel), or a local `.bin` |
+| Firmware menu | AREA512 for the Cardputer ADV, or the TERM512 builds (ST7789 / ILI9341 panel) |
+| **Load .bin** | pick a firmware image from your computer and boot it |
 | **Reset** | power cycle; the card stays in |
 | **SD card** | pauses the device and opens the card browser. Close it to continue. If you changed anything, the device restarts so the firmware remounts the card |
 | ⋮ menu | screenshot, serial console, keyboard help, and the busy-wait skip switch (below) |

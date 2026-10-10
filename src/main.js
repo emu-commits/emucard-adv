@@ -147,7 +147,7 @@ async function bootFirmware(bytes, label) {
 
 async function loadSelected() {
   const name = $('firmware').value;
-  if (name === 'local') { $('firmware-file').click(); return; }
+  if (name === 'local') return;                      // the file already loaded stays running
   pref.set('firmware', name);
   try {
     await bootFirmware(await getFirmware(name), name);
@@ -157,11 +157,22 @@ async function loadSelected() {
 }
 
 $('firmware').addEventListener('change', loadSelected);
+// Opening the picker straight from the button click keeps the user gesture browsers require.
+$('btn-load').addEventListener('click', () => $('firmware-file').click());
 $('firmware-file').addEventListener('change', async (ev) => {
   const f = ev.target.files[0];
   ev.target.value = '';
-  if (!f) { $('firmware').value = pref.get('firmware', 'Area512Adv.bin'); return; }
-  await bootFirmware(new Uint8Array(await f.arrayBuffer()), f.name);
+  if (!f) return;
+  try {
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    let opt = $('firmware').querySelector('option[data-local]');
+    if (!opt) { opt = document.createElement('option'); opt.dataset.local = '1'; opt.value = 'local'; $('firmware').append(opt); }
+    opt.textContent = f.name;
+    $('firmware').value = 'local';
+    await bootFirmware(bytes, f.name);
+  } catch (err) {
+    showOverlay(err.message);
+  }
 });
 
 // ---- keyboards -----------------------------------------------------------------------------
