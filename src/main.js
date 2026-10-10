@@ -135,8 +135,34 @@ async function getFirmware(name) {
   }
 }
 
+// A firmware .bin is either a whole flash image (bootloader at 0, partition table at 0x8000,
+// as AREA512 ships) or just the app, as PlatformIO and the Arduino IDE build it. The ROM can
+// only boot the first, so an app on its own goes at 0x10000 behind an ESP-IDF bootloader and a
+// partition table whose factory app partition (6 MB) starts there.
+const APP_OFFSET = 0x10000;
+const APP_MAX = 0x600000;
+let bootArea = null;
+
+async function flashImage(bytes, label) {
+  const u16 = (o) => bytes[o] | (bytes[o + 1] << 8);
+  if (bytes.length < 24 || bytes[0] !== 0xe9) throw new Error(`${label} is not an ESP32 firmware image`);
+  if (bytes.length > 0x8001 && bytes[0x8000] === 0xaa && bytes[0x8001] === 0x50) return bytes;
+  if (u16(12) !== 9) throw new Error(`${label} is not built for the ESP32-S3`);
+  if (bytes.length > APP_MAX) throw new Error(`${label} is too large for the 6 MB app partition`);
+  if (!bootArea) {
+    const res = await fetch(asset('vendor/esp32s3-boot-8mb.bin'));
+    if (!res.ok) throw new Error('could not load the bootloader (HTTP ' + res.status + ')');
+    bootArea = new Uint8Array(await res.arrayBuffer());
+  }
+  const image = new Uint8Array(APP_OFFSET + bytes.length).fill(0xff, 0, APP_OFFSET);
+  image.set(bootArea);
+  image.set(bytes, APP_OFFSET);
+  return image;
+}
+
 async function bootFirmware(bytes, label) {
   await ready.promise;
+  bytes = await flashImage(bytes, label);
   firmwareBytes = bytes;
   gotFrame = false;
   $('lid').hidden = true;
@@ -163,8 +189,14 @@ $('firmware-file').addEventListener('change', async (ev) => {
   const f = ev.target.files[0];
   ev.target.value = '';
   if (!f) return;
+  let bytes;
   try {
-    const bytes = new Uint8Array(await f.arrayBuffer());
+    bytes = await flashImage(new Uint8Array(await f.arrayBuffer()), f.name);
+  } catch (err) {
+    note(err.message, 8000);                         // whatever was running keeps running
+    return;
+  }
+  try {
     let opt = $('firmware').querySelector('option[data-local]');
     if (!opt) { opt = document.createElement('option'); opt.dataset.local = '1'; opt.value = 'local'; $('firmware').append(opt); }
     opt.textContent = f.name;
