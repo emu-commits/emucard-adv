@@ -27,7 +27,7 @@ sets up the blank card; later boots are faster). Then:
 | | |
 | --- | --- |
 | Firmware menu | AREA512 for the Cardputer ADV, or the TERM512 builds (ST7789 / ILI9341 panel) |
-| **Load .bin** | pick a firmware image from your computer and boot it |
+| **Load .bin** | pick a firmware image from your computer and boot it: a whole flash image, or just the app (`firmware.bin` from PlatformIO or the Arduino IDE), which is put behind a bootloader at 0x10000 |
 | **Reset** | power cycle; the card stays in |
 | **SD card** | pauses the device and opens the card browser. Close it to continue. If you changed anything, the device restarts so the firmware remounts the card |
 | ⋮ menu | screenshot, serial console, keyboard help, and the busy-wait skip switch (below) |
@@ -53,6 +53,7 @@ key). Arrow keys are `fn` + `;` `.` `,` `/`. Esc is `` ` `` (AREA512 turns it in
 | `Area512Adv.bin` | Cardputer ADV: works |
 | `Area512TFT7789.bin`, `Area512TFT9341.bin` | Cardputer ADV + TERM512: both screens work |
 | `Area512V11.bin` | Cardputer v1.1: boots, but its GPIO-matrix keyboard is not emulated (the ADV's TCA8418 is) |
+| FILTRE (sampler, app-only `.bin`) | Cardputer ADV + TERM512: both screens and the keyboard work; audio is not emulated |
 
 Other ESP32-S3 firmware for the Cardputer ADV that uses the same hardware (M5Unified / M5GFX
 display, TCA8418 keyboard, SPI microSD) should also run. Audio, the IMU, Wi-Fi and IR are not
@@ -103,5 +104,6 @@ firmware is modified. Untick **Skip busy-wait loops** in the ⋮ menu to emulate
 - ESP32-S3 mask ROM (`vendor/esp32s3_rev0_rom.elf`): Apache-2.0, Espressif Systems, from
   [esp-rom-elfs](https://github.com/espressif/esp-rom-elfs).
 - AREA512: MIT, engneer-hamachan. The firmware is downloaded from its repository and is not
-  included here.
+  included here. `vendor/esp32s3-boot-8mb.bin` (the ESP-IDF bootloader, Apache-2.0, and
+  partition table that app-only images are booted with) is the first 36 KB of `Area512Adv.bin`.
 - TERM512 external display and case by Prokuon.

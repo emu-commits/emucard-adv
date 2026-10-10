@@ -65,6 +65,20 @@ The page sends key-down and key-up events (`esp32sim_key`). The board queues the
 TCA8418's event FIFO and raises its key interrupt flag. AREA512 polls the FIFO over I2C and
 does its own shift, Fn, Ctrl, repeat and kana handling, exactly as on the device.
 
+Firmware built on M5Cardputer's keyboard driver (FILTRE, for one) does not poll: it waits for
+the TCA8418's INT pin (GPIO 11) to fall. The board drives INT low while an interrupt status
+bit that CFG enables is set, and, as on the chip, K_INT comes straight back after a clear
+while events are still queued.
+
+### Floating pins and the TERM512 lid
+
+The TERM512's D/C line on GPIO 6 is an input on the panel, so to the ESP32 the pin floats.
+FILTRE uses that to find the lid: it reads GPIO 6 with the pull-up on, then with the pull-down
+on, and only starts the lid display if the pin followed both. esp32sim did not model pad pulls,
+so the patch adds `BoardModel::floating_pins`: when firmware writes the IO_MUX register of a
+pin the board lists there, the pin reads as the pull-up (`FUN_WPU`) or pull-down (`FUN_WPD`)
+it selects. FILTRE then drives the lid on the same wiring as AREA512 (CS 5, D/C 6, SD bus).
+
 ### Busy-wait skip ("spin skip")
 
 AREA512's character input loop calls `vTaskDelay(pdMS_TO_TICKS(2))`. With FreeRTOS at its
@@ -92,6 +106,11 @@ The switch is in the ⋮ menu (on by default), and `--spin-skip` on the esp32sim
 
 ## The page
 
+- **Firmware images.** AREA512 ships whole flash images (bootloader at 0, partition table at
+  0x8000, app at 0x10000). PlatformIO and the Arduino IDE build just the app, which starts with
+  the same `0xE9` header but has no partition table at 0x8000. The page puts such an image at
+  0x10000 behind `vendor/esp32s3-boot-8mb.bin` (AREA512's bootloader and partition table: a
+  6 MB factory app partition at 0x10000), so the ROM boots it the same way.
 - **Firmware** is fetched from `raw.githubusercontent.com/engneer-hamachan/area512/main/firmware/`
   with ETag revalidation and kept in IndexedDB for offline use.
 - **The card** is a 64 MB FAT16 image formatted in the browser (`src/fat.js`). The worker reports
@@ -111,5 +130,5 @@ The switch is in the ⋮ menu (on by default), and `--spin-skip` on the esp32sim
 - `npm run smoke`: boots `Area512Adv.bin` in Node through the WebAssembly core with a blank
   card. It checks that the card mounts, the board is detected as an ADV, the keypad answers,
   the firmware seeds `Area512_data`, the screen draws, and keys change the screen.
-- In esp32sim: `cargo test --release -p esp-soc -p esp32s3` covers the SD card model and the
-  keypad.
+- In esp32sim: `cargo test --release -p esp-soc -p esp32s3` covers the SD card model, the
+  keypad and its INT line, and floating pins.

@@ -1,31 +1,32 @@
 From 8147c20e25dae4585d93bfdefb22aa27c8c90c53 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Sun, 4 Oct 2026 23:51:04 +0000
+Date: Sat, 10 Oct 2026 21:30:00 +0000
 Subject: [PATCH] Cardputer ADV board: SPI3, GP-SPI RX DMA, SD card, TCA8418,
- spin skip
+ spin skip, keypad INT, floating pins
 
 ---
  cli/src/lib.rs                     |   9 +-
  emu-core/src/core.rs               |   4 +
  esp-periph/src/gpspi.rs            |   6 +-
- esp-soc/src/board.rs               |  14 ++
+ esp-soc/src/board.rs               |  16 ++
  esp-soc/src/devices/mod.rs         |   2 +
- esp-soc/src/devices/sd_spi.rs      | 391 +++++++++++++++++++++++++++++
+ esp-soc/src/devices/sd_spi.rs      | 391 +++++++++++++++++++++++++++++++++++++
  esp-soc/src/load.rs                |   8 +
- esp-soc/src/machine.rs             |  61 ++++-
- esp-soc/src/machine/web.rs         |  13 +
+ esp-soc/src/machine.rs             |  61 +++++-
+ esp-soc/src/machine/web.rs         |  13 ++
  esp-soc/src/soc.rs                 |   9 +
- esp32s3/src/board/cardputer_adv.rs | 323 ++++++++++++++++++++++++
+ esp32s3/src/board/cardputer_adv.rs | 376 +++++++++++++++++++++++++++++++++++
  esp32s3/src/board/mod.rs           |   3 +
- esp32s3/src/bus.rs                 |  29 ++-
- esp32s3/src/bus/dma.rs             |  77 ++++--
+ esp32s3/src/bus.rs                 |  39 +++-
+ esp32s3/src/bus/dma.rs             |  77 +++++---
  esp32s3/src/bus/pins.rs            |   6 +
  esp32s3/src/periph.rs              |   7 +-
  esp32s3/src/soc.rs                 |  10 +
- wasm/src/lib.rs                    |  51 ++++
+ esp32s3/tests/pin_transport.rs     |  17 ++
+ wasm/src/lib.rs                    |  51 +++++
  wasm/src/machine.rs                |   8 +
  xtensa-lx7/src/core.rs             |   1 +
- 20 files changed, 994 insertions(+), 38 deletions(-)
+ 21 files changed, 1076 insertions(+), 38 deletions(-)
  create mode 100644 esp-soc/src/devices/sd_spi.rs
  create mode 100644 esp32s3/src/board/cardputer_adv.rs
 
@@ -110,10 +111,19 @@ index baf9b68b..8b247c46 100644
  
      pub fn has_pending_transfer(&self) -> bool { self.pending.is_some() }
 diff --git a/esp-soc/src/board.rs b/esp-soc/src/board.rs
-index f3da5f1a..5f5e394f 100644
+index f3da5f1a..ca1d8adf 100644
 --- a/esp-soc/src/board.rs
 +++ b/esp-soc/src/board.rs
-@@ -116,6 +116,20 @@ pub trait BoardModel {
+@@ -102,6 +102,8 @@ pub trait BoardModel {
+     fn touch_at(&mut self, _cycle: VirtualCycle, x: u16, y: u16, down: bool) { self.touch(x, y, down); }
+     /// Current board-driven GPIO input levels, used to reconnect a persistent board after reset.
+     fn input_levels(&self) -> Vec<(u8, bool)> { Vec::new() }
++    /// Pins nothing on the board drives: they read as the pad's pull-up or pull-down.
++    fn floating_pins(&self) -> u64 { 0 }
+     /// Whether GPIO edge polling is needed. Cached by `attach_board_devices`.
+     fn uses_gpio_edges(&self) -> bool { true }
+     /// Earliest autonomous transition strictly after the board's current cycle.
+@@ -116,6 +118,20 @@ pub trait BoardModel {
      fn named_pin(&self, _name: &str) -> Option<u8> { None }
      /// The rotary encoder's (CLK, DT) pins, if there is one.
      fn encoder(&self) -> Option<(u8, u8)> { None }
@@ -784,10 +794,10 @@ index 67bb8ad2..c9a28fbc 100644
      /// Re-derive the interrupt lines after a device change; true if a core's input may differ.
 diff --git a/esp32s3/src/board/cardputer_adv.rs b/esp32s3/src/board/cardputer_adv.rs
 new file mode 100644
-index 00000000..51111924
+index 00000000..bfed28c4
 --- /dev/null
 +++ b/esp32s3/src/board/cardputer_adv.rs
-@@ -0,0 +1,323 @@
+@@ -0,0 +1,376 @@
 +//! M5Stack Cardputer ADV (Stamp-S3A), optionally with the TERM512 external display.
 +//!
 +//! Pins are taken from the libraries the firmware links, at the revisions AREA512 pins them
@@ -802,12 +812,13 @@ index 00000000..51111924
 +//!   AREA512 `console/keyboard.cpp`). Key event codes are `row * 10 + col + 1` of the
 +//!   controller's matrix; AREA512's `cardputer_lookup_key` gives each its legend.
 +//! - microSD (TF slot) on SPI2: SCLK 40, MOSI 14, MISO 39, CS 12 (AREA512 `sd/area512_sd.c`).
-+//! - TERM512 CapTFT (AREA512 TFT builds only): a 240x320 ST7789 (or ILI9341) on SPI2 sharing
-+//!   the card's bus, DC 6, CS 5, RST 3 (`captft/gfx/area512_display.cpp`).
++//! - TERM512 CapTFT (AREA512 TFT builds, FILTRE): a 240x320 ST7789 (or ILI9341) on SPI2
++//!   sharing the card's bus, DC 6, CS 5, RST 3 (`captft/gfx/area512_display.cpp`). D/C is a
++//!   panel input, so GPIO 6 floats; FILTRE detects the lid by that (see `floating_pins`).
 +//!
 +//! The board routes every SPI transaction by the chip selects that are low during it, so the
 +//! panel, the card and the external display can share hosts the way the firmware shares them.
-+use esp_soc::board::{BoardModel, SpiPins};
++use esp_soc::board::{BoardEdge, BoardModel, SpiPins};
 +use esp_soc::devices::{DcsPanel, SdCard};
 +use crate::i2c::I2cDevice;
 +use std::collections::VecDeque;
@@ -871,12 +882,19 @@ index 00000000..51111924
 +
 +    fn write(&mut self, reg: usize, v: u8) {
 +        match reg {
-+            Self::INT_STAT => self.regs[reg] &= !v,          // write 1 to clear
++            Self::INT_STAT => {
++                // Write 1 to clear. K_INT comes straight back while events are left in the FIFO.
++                self.regs[reg] &= !v;
++                if !self.fifo.is_empty() { self.regs[reg] |= 0x01; }
++            }
 +            Self::KEY_EVENT_A..=0x0d => {}
 +            r if r < self.regs.len() => self.regs[r] = v,
 +            _ => {}
 +        }
 +    }
++
++    /// The open-drain INT pin: low while a status bit its CFG enable bit allows is set.
++    pub fn int_asserted(&self) -> bool { self.regs[Self::INT_STAT] & self.regs[Self::CFG] & 0x0f != 0 }
 +
 +    pub fn key(&mut self, code: u8, down: bool) {
 +        if self.fifo.len() >= Self::FIFO_DEPTH {
@@ -948,6 +966,9 @@ index 00000000..51111924
 +    kbd: Arc<Mutex<Tca8418State>>,
 +    backlight: bool,
 +    gpio_events: u64,
++    /// The keypad INT level last driven onto GPIO 11, and edges not yet taken by the SoC.
++    kbd_int: bool,
++    edges: Vec<BoardEdge>,
 +}
 +
 +impl Default for CardputerAdv { fn default() -> Self { Self::new() } }
@@ -957,6 +978,7 @@ index 00000000..51111924
 +        CardputerAdv {
 +            lcd: Panel::new(), ext: Panel::new(), sd: SdCard::new(Vec::new()), sd_selected: false,
 +            kbd: Arc::new(Mutex::new(Tca8418State::default())), backlight: false, gpio_events: 0,
++            kbd_int: true, edges: Vec::new(),
 +        }
 +    }
 +
@@ -1005,6 +1027,7 @@ index 00000000..51111924
 +
 +    fn gpio_changes(&mut self, changes: &[(u8, bool)]) {
 +        for &(pin, level) in changes {
++            if std::env::var("CPTRACE").is_ok() && ![LCD_DC, LCD_CS, SD_CS, 47, 48, 11, 38, 39, 8, 9].contains(&pin) { eprintln!("GPIO {} = {}", pin, level); }
 +            self.gpio_events += 1;
 +            match pin {
 +                LCD_DC => self.lcd.dcs.dc = level,
@@ -1022,6 +1045,7 @@ index 00000000..51111924
 +
 +    fn spi_transfer_pins(&mut self, _host: u8, pins: SpiPins, tx: &[u8], rx_len: usize) -> Vec<u8> {
 +        let cs = |pin: u8| pins.cs & (1u64 << pin) != 0;
++        if std::env::var("CPTRACE").is_ok() && !cs(LCD_CS) && !cs(SD_CS) && !(pins.cs == 0 && pins.miso == Some(SD_MISO)) { eprintln!("SPI host{} sclk={:x} mosi={:x} miso={:?} cs={:x} tx={:02x?} rx={}", _host, pins.sclk, pins.mosi, pins.miso, pins.cs, &tx[..tx.len().min(8)], rx_len); }
 +        if cs(LCD_CS) { return self.lcd.transfer(tx, rx_len); }
 +        if cs(EXT_CS) { return self.ext.transfer(tx, rx_len); }
 +        if cs(SD_CS) {
@@ -1044,12 +1068,28 @@ index 00000000..51111924
 +    }
 +
 +    fn input_levels(&self) -> Vec<(u8, bool)> {
-+        // GPIO 8/9 high (I2C pull-ups: the ADV), 5/6 low (nothing there), G0 released,
-+        // keypad INT idle high.
-+        vec![(KBD_SDA, true), (KBD_SCL, true), (5, false), (6, false), (BTN_G0, true), (KBD_INT, true), (SD_MISO, true)]
++        // GPIO 8/9 high (I2C pull-ups: the ADV), 5/6 low until configured (see
++        // `floating_pins`), G0 released, keypad INT idle high.
++        vec![(KBD_SDA, true), (KBD_SCL, true), (5, std::env::var("P5").is_ok()), (6, std::env::var("P6").is_ok()), (BTN_G0, true), (KBD_INT, true), (SD_MISO, true)]
 +    }
 +
-+    fn key_event(&mut self, code: u8, down: bool) { self.kbd.lock().unwrap().key(code, down); }
++    // The TERM512's D/C line on GPIO 6 is a panel input, so the ESP32 sees it floating. FILTRE
++    // tells the lid is there by reading it with the pull-up and then the pull-down on: a pin
++    // that follows both is not driven by anything else.
++    fn floating_pins(&self) -> u64 { 1 << EXT_DC }
++
++    fn key_event(&mut self, code: u8, down: bool) { if std::env::var("CPTRACE").is_ok() { eprintln!("KEY {code} {down}"); } self.kbd.lock().unwrap().key(code, down); }
++
++    // Firmware that waits for the keypad interrupt (M5Cardputer's TCA8418 driver) instead of
++    // polling the FIFO needs INT to fall when a key event arrives and rise once it is cleared.
++    fn advance_to(&mut self, cycle: u64) {
++        let level = !self.kbd.lock().unwrap().int_asserted();
++        if level != self.kbd_int {
++            self.kbd_int = level;
++            self.edges.push(BoardEdge { cycle, pin: KBD_INT, level });
++        }
++    }
++    fn take_edges(&mut self) -> Vec<BoardEdge> { std::mem::take(&mut self.edges) }
 +
 +    fn set_sd_image(&mut self, image: Vec<u8>) { self.sd = SdCard::new(image); self.sd_selected = false; }
 +    fn sd_image(&self) -> Option<&[u8]> { self.sd.is_present().then(|| self.sd.image()) }
@@ -1102,6 +1142,29 @@ index 00000000..51111924
 +    }
 +
 +    #[test]
++    fn keypad_int_follows_key_events() {
++        let mut b = CardputerAdv::new();
++        b.kbd.lock().unwrap().write(Tca8418State::CFG, 0x01);   // KE_IEN
++        b.advance_to(0);
++        assert!(b.take_edges().is_empty(), "INT idles high");
++        b.key_event(13, true);
++        b.key_event(13, false);
++        b.advance_to(10);
++        assert_eq!(b.take_edges(), vec![BoardEdge { cycle: 10, pin: KBD_INT, level: false }]);
++        // Clearing K_INT with an event still queued keeps INT low; it rises once drained.
++        let mut st = b.kbd.lock().unwrap();
++        st.read(Tca8418State::KEY_EVENT_A);
++        st.write(Tca8418State::INT_STAT, 0x01);
++        assert!(st.int_asserted());
++        st.read(Tca8418State::KEY_EVENT_A);
++        st.write(Tca8418State::INT_STAT, 0x01);
++        assert!(!st.int_asserted());
++        drop(st);
++        b.advance_to(20);
++        assert_eq!(b.take_edges(), vec![BoardEdge { cycle: 20, pin: KBD_INT, level: true }]);
++    }
++
++    #[test]
 +    fn panel_answers_rddid() {
 +        let mut b = CardputerAdv::new();
 +        b.gpio_changes(&[(LCD_DC, false)]);
@@ -1138,7 +1201,7 @@ index 32162216..855bda67 100644
          "waveshare-cam" | "waveshare" => Some(Box::new(WaveshareCam::new())),
          "waveshare-lcd4b" | "lcd4b" => Some(Box::new(WaveshareLcd4b::new())),
 diff --git a/esp32s3/src/bus.rs b/esp32s3/src/bus.rs
-index 93d86704..7c396e6a 100644
+index 93d86704..6c54aead 100644
 --- a/esp32s3/src/bus.rs
 +++ b/esp32s3/src/bus.rs
 @@ -60,6 +60,12 @@ pub struct SocBus {
@@ -1207,7 +1270,7 @@ index 93d86704..7c396e6a 100644
          if a == PERIPH_BASE + 0x24_000 && v & (1 << 24) != 0 {
              self.spi2_dma_fault = None;
              self.spi2_scheduled = None;
-@@ -482,6 +495,9 @@ impl SocBus {
+@@ -482,7 +495,20 @@ impl SocBus {
          if a == PERIPH_BASE + 0x24_000 && v & (1 << 24) != 0 && !self.periph.spi2.has_pending_transfer() {
              self.spi2_pins = self.board.uses_spi_pins().then(|| self.periph.spi2_pins());
          }
@@ -1215,9 +1278,20 @@ index 93d86704..7c396e6a 100644
 +            self.spi3_pins = self.board.uses_spi_pins().then(|| self.periph.spi3_pins());
 +        }
          self.periph.write32(a, v);
++        // IO_MUX_GPIOn: a pad the board leaves unconnected reads as its pull resistor
++        // (FUN_WPU bit 8, FUN_WPD bit 7); with neither it keeps its last level.
++        if (PERIPH_BASE + 0x9_004..PERIPH_BASE + 0x9_004 + 49 * 4).contains(&a) {
++            let pin = ((a - PERIPH_BASE - 0x9_004) / 4) as u8;
++            if self.board.floating_pins() & (1u64 << pin) != 0 && v & (3 << 7) != 0 {
++                let old_input = self.periph.gpio.input;
++                self.periph.gpio.set_input(pin, v & (1 << 8) != 0);
++                self.irq_dirty |= old_input != self.periph.gpio.input;
++            }
++        }
          if old_gpio_out != self.periph.gpio.out || old_gpio_enable != self.periph.gpio.enable {
              let changes = &self.periph.gpio.changes;
-@@ -496,6 +512,7 @@ impl SocBus {
+             if let Some(events) = &mut self.gpio_events {
+@@ -496,6 +522,7 @@ impl SocBus {
          }
          self.complete_spi2_dma();
          self.deliver_spi2_transfer();
@@ -1225,7 +1299,7 @@ index 93d86704..7c396e6a 100644
          // GPIO output writes usually only drive the board, but an enabled level
          // interrupt also observes output levels. Inspect only changed output pins.
          if spi {
-@@ -792,6 +809,7 @@ impl SocBus {
+@@ -792,6 +819,7 @@ impl SocBus {
              || p.wifi.ap.is_some() || p.wifi.net.is_some() || !p.wifi.tx_pending.is_empty()
              || p.aes.dma_pending || p.sha.dma_pending
              || p.spi2.has_pending_transfer() || p.spi2.dma_tx_pending.is_some()
@@ -1233,7 +1307,7 @@ index 93d86704..7c396e6a 100644
              || p.rmt.ch.iter().any(|c| c.running) || !p.rmt.done.is_empty()
              || !p.gpio.changes.is_empty() || !p.gpio.input_changes.is_empty()
              || p.rtc.ram.read(0x98) & (1 << 31) != 0
-@@ -845,6 +863,7 @@ impl SocBus {
+@@ -845,6 +873,7 @@ impl SocBus {
          }
          self.complete_spi2_dma();
          self.deliver_spi2_transfer();
@@ -1472,6 +1546,31 @@ index 78083c9e..8b7724bd 100644
      fn take_deferred(&mut self) -> bool { std::mem::take(&mut self.mmio_deferred) }
      fn refresh_irq(&mut self) -> bool {
          // Inputs are sampled at refresh boundaries. Clearing and reasserting a source
+diff --git a/esp32s3/tests/pin_transport.rs b/esp32s3/tests/pin_transport.rs
+index eb7ac139..8702f48b 100644
+--- a/esp32s3/tests/pin_transport.rs
++++ b/esp32s3/tests/pin_transport.rs
+@@ -342,3 +342,20 @@ fn legacy_gpio_callback_still_receives_only_level_changes() {
+     m.bus.write32(0x6000_4028, 16).unwrap();
+     assert_eq!(*changes.lock().unwrap(), [(4, true), (4, false)]);
+ }
++
++#[test]
++fn floating_pins_read_as_their_pull_resistor() {
++    let mut m = esp32s3::machine([0; 6]);
++    m.bus.board = Box::new(esp32s3::board::CardputerAdv::new());
++    m.bus.attach_board_devices();
++    let bus = &mut m.bus;
++    let level = |bus: &mut esp32s3::bus::SocBus, pin: u32| bus.read32(0x6000_403c).unwrap() >> pin & 1;
++    // GPIO 6 (TERM512 D/C) floats: pull-up reads 1, pull-down reads 0.
++    bus.write32(0x6000_9004 + 4 * 6, 1 << 12 | 1 << 9 | 1 << 8).unwrap();
++    assert_eq!(level(bus, 6), 1);
++    bus.write32(0x6000_9004 + 4 * 6, 1 << 12 | 1 << 9 | 1 << 7).unwrap();
++    assert_eq!(level(bus, 6), 0);
++    // GPIO 5 is held low by the board whatever the pull.
++    bus.write32(0x6000_9004 + 4 * 5, 1 << 12 | 1 << 9 | 1 << 8).unwrap();
++    assert_eq!(level(bus, 5), 0);
++}
 diff --git a/wasm/src/lib.rs b/wasm/src/lib.rs
 index c0390234..b73f96cc 100644
 --- a/wasm/src/lib.rs
