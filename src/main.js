@@ -6,7 +6,9 @@ import { formatImage } from './fat.js';
 import * as storage from './storage.js';
 
 const $ = (id) => document.getElementById(id);
-const FIRMWARE_BASE = 'https://raw.githubusercontent.com/engneer-hamachan/area512/main/firmware/';
+// The AREA512 release the firmware menu offers. Bump this to move to a newer release.
+const AREA512_VERSION = 'v2.7';
+const FIRMWARE_BASE = `https://raw.githubusercontent.com/engneer-hamachan/area512/${AREA512_VERSION}/firmware/`;
 const DEFAULT_CARD_MB = 64;
 const asset = (path) => new URL(path, document.baseURI).href;
 

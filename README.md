@@ -5,9 +5,9 @@ An M5Stack Cardputer ADV in the browser, running the real
 microSD card. It is a static site (HTML, JavaScript and WebAssembly), so it runs on GitHub
 Pages with no server, and works offline after the first visit.
 
-- **Real firmware, as shipped.** The official AREA512 binaries are downloaded from the AREA512
-  repository at start-up, so new releases work as soon as they are published. You can also
-  load any `.bin` of your own. Nothing is patched.
+- **Real firmware, as shipped.** The official AREA512 binaries (currently release
+  [v2.7](https://github.com/engneer-hamachan/area512/releases/tag/v2.7)) are downloaded from the
+  AREA512 repository at start-up. You can also load any `.bin` of your own. Nothing is patched.
 - **microSD card that works.** The firmware mounts it, sets up `Area512_data` on first boot and
   reads and writes it like a real card. The card is saved in your browser between visits.
 - **SD card browser.** Add files or whole folders (button or drag and drop), make folders,

@@ -111,7 +111,8 @@ The switch is in the ⋮ menu (on by default), and `--spin-skip` on the esp32sim
   the same `0xE9` header but has no partition table at 0x8000. The page puts such an image at
   0x10000 behind `vendor/esp32s3-boot-8mb.bin` (AREA512's bootloader and partition table: a
   6 MB factory app partition at 0x10000), so the ROM boots it the same way.
-- **Firmware** is fetched from `raw.githubusercontent.com/engneer-hamachan/area512/main/firmware/`
+- **Firmware** is fetched from `raw.githubusercontent.com/engneer-hamachan/area512/<tag>/firmware/`,
+  where the tag is the release named by `AREA512_VERSION` in `src/main.js` (currently `v2.7`),
   with ETag revalidation and kept in IndexedDB for offline use.
 - **The card** is a 64 MB FAT16 image formatted in the browser (`src/fat.js`). The worker reports
   when the firmware writes to it, and the page saves it two seconds after writing stops. Only
