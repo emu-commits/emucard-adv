@@ -328,20 +328,21 @@ dialog::backdrop { background: #000a; }
   display: none;
   align-items: center;
   justify-content: center;
-  width: calc(var(--u) * 1.1);
-  height: calc(var(--u) * 0.55);
+  width: 100%;
+  height: calc(var(--u) * 2);
   padding: 0;
-  border-radius: calc(var(--u) * 0.28);
+  border-radius: calc(var(--u) * 0.3);
   background: #1d1e21;
   border-color: #111;
   color: #9a9ea5;
 }
-.type-btn svg { width: 62%; height: auto; }
+.type-btn svg { width: auto; height: 50%; }
 body.typing .type-btn { color: var(--accent); }
 .touch-only { display: none; }
 @media (pointer: coarse) {
   .type-input { pointer-events: auto; }
   .type-btn { display: flex; }
+  .grille { height: var(--u); }       /* room for the bigger keyboard button */
   .touch-only { display: block; }
 }
 
@@ -353,19 +354,52 @@ body.typing .type-btn { color: var(--accent); }
   bottom: 0;
   z-index: 20;
   display: grid;
-  grid-template-columns: repeat(3, 1fr) calc(var(--u) * 0.3) repeat(3, 1fr) calc(var(--u) * 0.3) 1fr;
+  /* esc tab fn / ctrl opt alt, then the hide button on its own in the middle, then the arrows */
+  grid-template-columns: repeat(3, 1fr) calc(var(--u) * 0.6) 1fr calc(var(--u) * 0.6) repeat(3, 1fr);
   gap: calc(var(--u) * 0.12);
   padding: 8px max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left));
   background: linear-gradient(#36383d, #26272b);
   border-top: 1px solid #474a50;
-  box-shadow: 0 -8px 24px #0007;
   user-select: none;
   -webkit-user-select: none;
   touch-action: none;
 }
+/* The bar's background reaches down behind the system keyboard, so a touch just below the keys
+   never lands on the page (which would put the keyboard away). */
+.typebar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 100vh;
+  background: #26272b;
+}
 .typebar[hidden] { display: none; }
 .typebar .key { height: calc(var(--u) * 0.8); }
 .typebar .key.arrow { font: 600 calc(var(--u) * 0.38) / 1 system-ui, sans-serif; }
-.typebar .hide { grid-area: 1 / 9 / 3 / 10; height: auto; color: var(--muted); }
+.typebar .hide { grid-area: 1 / 5 / 3 / 6; height: auto; color: var(--muted); }
 .typebar .hide svg { width: 52%; height: auto; }
 body.typing main { padding-bottom: 140px; }
+
+/* While typing, the bigger screen is enlarged over a black backdrop that fills the space above
+   the bar; typing.js sizes both to the visible part of the page. */
+.zoom-backdrop {
+  position: fixed;
+  z-index: 18;
+  padding-top: env(safe-area-inset-top);
+  background: #000;
+  touch-action: none;
+}
+.zoom-backdrop[hidden] { display: none; }
+canvas.zoomed {
+  position: fixed;
+  z-index: 19;
+  object-fit: contain;
+  object-position: 50% 100%;
+  background: transparent;
+  touch-action: none;
+}
+/* Keep the screen's place in the page, so nothing beneath shifts. */
+.screen-bezel:has(> canvas.zoomed)::before { content: ''; display: block; aspect-ratio: 240 / 135; }
+.lid-bezel:has(> canvas.zoomed)::before { content: ''; display: block; aspect-ratio: 4 / 3; }
