@@ -1,8 +1,10 @@
 // Offline support: every same-origin file is fetched from the network first and cached, so a
 // new deployment is picked up on the next load and the last good copy still works offline.
+// The network fetch revalidates instead of trusting the HTTP cache (GitHub Pages allows ten
+// minutes), or a load just after a deployment could mix new modules with old ones.
 // Firmware downloads (raw.githubusercontent.com) are cross-origin and stored by the page in
 // IndexedDB instead.
-const CACHE = 'cardputer-emu-v1';
+const CACHE = 'cardputer-emu-v2';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => {
@@ -15,7 +17,7 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
   event.respondWith(
-    fetch(req)
+    fetch(req, { cache: 'no-cache' })
       .then((res) => {
         if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); }
         return res;
