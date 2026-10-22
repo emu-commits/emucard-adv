@@ -357,9 +357,10 @@ body.typing .type-btn { color: var(--accent); }
   /* esc tab fn / ctrl opt alt, then the hide button on its own in the middle, then the arrows */
   grid-template-columns: repeat(3, 1fr) calc(var(--u) * 0.6) 1fr calc(var(--u) * 0.6) repeat(3, 1fr);
   gap: calc(var(--u) * 0.12);
-  /* The deep bottom edge keeps a touch that misses the keys on the bar, away from the system
-     keyboard's own strip (and its Done button) just below. */
-  padding: 8px max(12px, env(safe-area-inset-right)) calc(var(--u) * 0.6) max(12px, env(safe-area-inset-left));
+  /* The deep bottom edge, about a key tall, keeps a touch that misses the keys on the bar. Just
+     below it Safari owns the screen (its address pill and the keyboard's own strip), and a touch
+     there puts the system keyboard away. */
+  padding: 8px max(12px, env(safe-area-inset-right)) calc(var(--u) * 1.1) max(12px, env(safe-area-inset-left));
   background: linear-gradient(#36383d, #26272b);
   border-top: 1px solid #474a50;
   user-select: none;
