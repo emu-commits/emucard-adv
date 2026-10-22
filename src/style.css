@@ -351,7 +351,7 @@ body.typing .type-btn { color: var(--accent); }
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 0;
+  top: 0;                           /* typing.js moves it down onto the system keyboard */
   z-index: 20;
   display: grid;
   /* esc tab fn / ctrl opt alt, then the hide button on its own in the middle, then the arrows */
