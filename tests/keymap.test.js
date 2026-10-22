@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { KEYS, CODE, codeAt, chordForEvent } from '../src/keymap.js';
+import { KEYS, CODE, ARROW, codeAt, chordForEvent, chordForChar, chordCodes } from '../src/keymap.js';
 
 test('56 keys with unique TCA8418 codes', () => {
   assert.equal(KEYS.length, 56);
@@ -40,3 +40,20 @@ test('arrows, escape and ctrl', () => {
 });
 
 function pick(c) { return { code: c.code, shift: c.shift }; }
+
+test('text typed on a phone keyboard', () => {
+  assert.deepEqual(pick(chordForChar('?')), { code: 64, shift: true });
+  assert.equal(chordForChar('\n').code, CODE.Enter);
+  assert.equal(chordForChar('\t').code, CODE.Tab);
+  // Smart punctuation becomes the plain character the device has.
+  assert.deepEqual(chordForChar('’'), chordForChar("'"));
+  assert.deepEqual(chordForChar('“'), chordForChar('"'));
+  assert.deepEqual(chordForChar('—'), chordForChar('-'));
+  assert.equal(chordForChar('é'), null);
+});
+
+test('chords press their modifiers first', () => {
+  assert.deepEqual(chordCodes(chordForEvent(ev('ArrowLeft'))), [CODE.Fn, ARROW.Left]);
+  assert.deepEqual(chordCodes(chordForChar('A')), [CODE.Shift, 13]);
+  assert.deepEqual(chordCodes({ code: CODE.Backspace }), [CODE.Backspace]);
+});

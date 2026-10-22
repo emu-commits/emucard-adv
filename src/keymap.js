@@ -42,6 +42,36 @@ for (const k of KEYS) {
   if (k.shifted) CHAR_TO_KEY.set(k.shifted, [k.code, true]);
 }
 
+// The firmware's arrow keys are Fn + these keys.
+export const ARROW = {
+  Up: CHAR_TO_KEY.get(';')[0], Down: CHAR_TO_KEY.get('.')[0],
+  Left: CHAR_TO_KEY.get(',')[0], Right: CHAR_TO_KEY.get('/')[0],
+};
+
+// What phone keyboards type in place of plain ASCII (smart quotes and dashes).
+const PLAIN = { '\u2018': "'", '\u2019': "'", '\u201c': '"', '\u201d': '"', '\u2013': '-', '\u2014': '-', '\u00a0': ' ' };
+
+const NONE = { shift: false, fn: false, ctrl: false, alt: false, opt: false };
+
+/** The chord that types one character of text, or null. */
+export function chordForChar(ch) {
+  if (ch === '\n') return { ...NONE, code: CODE.Enter };
+  if (ch === '\t') return { ...NONE, code: CODE.Tab };
+  const hit = CHAR_TO_KEY.get(PLAIN[ch] || ch);
+  return hit ? { ...NONE, code: hit[0], shift: hit[1] } : null;
+}
+
+/** The codes to press for a chord, modifiers first. */
+export function chordCodes(chord) {
+  const codes = [];
+  if (chord.fn) codes.push(CODE.Fn);
+  if (chord.ctrl) codes.push(CODE.Ctrl);
+  if (chord.alt) codes.push(CODE.Alt);
+  if (chord.shift) codes.push(CODE.Shift);
+  codes.push(chord.code);
+  return codes;
+}
+
 /**
  * Translate a browser KeyboardEvent into the Cardputer chord that types the same thing:
  * {code, shift, fn, ctrl, alt} or null. The firmware does its own shifting, so a host "!" is
@@ -49,17 +79,17 @@ for (const k of KEYS) {
  */
 export function chordForEvent(ev) {
   const k = ev.key;
-  const base = { shift: false, fn: false, ctrl: false, alt: false, opt: false };
+  const base = NONE;
   switch (k) {
     case 'Enter': return { ...base, code: CODE.Enter };
     case 'Backspace': case 'Delete': return { ...base, code: CODE.Backspace };
     case 'Tab': return { ...base, code: CODE.Tab, shift: ev.shiftKey };
     case 'Escape': return { ...base, code: codeAt(0, 0) };                // the firmware sends ESC for `
     case ' ': return { ...base, code: CODE.Space, ctrl: ev.ctrlKey };
-    case 'ArrowUp': return { ...base, code: CHAR_TO_KEY.get(';')[0], fn: true };
-    case 'ArrowDown': return { ...base, code: CHAR_TO_KEY.get('.')[0], fn: true };
-    case 'ArrowLeft': return { ...base, code: CHAR_TO_KEY.get(',')[0], fn: true };
-    case 'ArrowRight': return { ...base, code: CHAR_TO_KEY.get('/')[0], fn: true };
+    case 'ArrowUp': return { ...base, code: ARROW.Up, fn: true };
+    case 'ArrowDown': return { ...base, code: ARROW.Down, fn: true };
+    case 'ArrowLeft': return { ...base, code: ARROW.Left, fn: true };
+    case 'ArrowRight': return { ...base, code: ARROW.Right, fn: true };
     case '`': return { ...base, code: codeAt(0, 0), fn: true };          // Fn+` types a backquote
     default: break;
   }
@@ -71,7 +101,6 @@ export function chordForEvent(ev) {
     return hit ? { ...base, code: hit[0], ctrl: true } : null;
   }
   if (k.length !== 1) return null;
-  const hit = CHAR_TO_KEY.get(k);
-  if (!hit) return null;
-  return { ...base, code: hit[0], shift: hit[1], alt: ev.altKey };
+  const chord = chordForChar(k);
+  return chord && { ...chord, alt: ev.altKey };
 }
