@@ -1,6 +1,7 @@
 // Page wiring: firmware download, the emulator worker, screens, keyboards, the microSD card.
-import { chordForEvent, CODE } from './keymap.js';
+import { chordForEvent, chordCodes } from './keymap.js';
 import { createKeyboard } from './keyboard.js';
+import { createTyping } from './typing.js';
 import { createSdBrowser, download } from './sdbrowser.js';
 import { formatImage } from './fat.js';
 import * as storage from './storage.js';
@@ -216,35 +217,33 @@ const keyboard = createKeyboard($('keyboard'), sendKey);
 
 const physical = new Map();   // KeyboardEvent.code -> codes pressed for it (modifiers first)
 const dialogOpen = () => document.querySelector('dialog[open]');
+const typeInput = $('type-input');
 
 window.addEventListener('keydown', (ev) => {
-  if (dialogOpen() || ev.target.closest?.('input, select, textarea')) return;
+  if (dialogOpen() || (ev.target.closest?.('input, select, textarea') && ev.target !== typeInput)) return;
   const chord = chordForEvent(ev);
   if (!chord) return;
   ev.preventDefault();
+  if (!ev.code) { typing.type(chord); return; }   // a software key: tap it, its keyup may differ
   if (ev.repeat || physical.has(ev.code)) return;     // the firmware repeats keys itself
-  const codes = [];
-  if (chord.fn) codes.push(CODE.Fn);
-  if (chord.ctrl) codes.push(CODE.Ctrl);
-  if (chord.alt) codes.push(CODE.Alt);
-  if (chord.shift) codes.push(CODE.Shift);
-  codes.push(chord.code);
+  const codes = chordCodes(chord);
   physical.set(ev.code, codes);
-  for (const c of codes) { sendKey(c, true); keyboard.show(c, true); }
+  for (const c of codes) keyboard.hold(c);
 });
 
 window.addEventListener('keyup', (ev) => {
   const codes = physical.get(ev.code);
   if (!codes) return;
   physical.delete(ev.code);
-  for (const c of codes.slice().reverse()) { sendKey(c, false); keyboard.show(c, false); }
+  for (const c of codes.slice().reverse()) keyboard.drop(c);
+  keyboard.typed();
 });
 
 function releaseAll() {
-  for (const codes of physical.values()) for (const c of codes) { sendKey(c, false); keyboard.show(c, false); }
   physical.clear();
   keyboard.reset();
 }
+const typing = createTyping({ input: typeInput, bar: $('typebar'), button: $('btn-type'), keyboard, onBlur: releaseAll });
 window.addEventListener('blur', releaseAll);
 
 // ---- buttons -------------------------------------------------------------------------------

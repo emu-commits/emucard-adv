@@ -303,3 +303,69 @@ dialog::backdrop { background: #000a; }
   .controls { margin-left: 0; width: 100%; }
   .controls select { flex: 1; }
 }
+
+/* ---- touch typing ------------------------------------------------------------------------ */
+/* A transparent field over the screen: tapping the screen brings up the system keyboard. */
+.type-input {
+  position: absolute;
+  top: calc(var(--u) * 0.22);
+  left: calc(var(--u) * 0.22);
+  width: calc(100% - var(--u) * 0.44);
+  height: calc(100% - var(--u) * 0.44);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  font-size: 16px;                  /* smaller text makes iOS zoom in on focus */
+  color: transparent;
+  caret-color: transparent;
+  background: transparent;
+  -webkit-user-select: text;        /* iOS will not type into a field that cannot be selected */
+  user-select: text;
+  pointer-events: none;
+}
+.type-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: calc(var(--u) * 1.1);
+  height: calc(var(--u) * 0.55);
+  padding: 0;
+  border-radius: calc(var(--u) * 0.28);
+  background: #1d1e21;
+  border-color: #111;
+  color: #9a9ea5;
+}
+.type-btn svg { width: 62%; height: auto; }
+body.typing .type-btn { color: var(--accent); }
+.touch-only { display: none; }
+@media (pointer: coarse) {
+  .type-input { pointer-events: auto; }
+  .type-btn { display: flex; }
+  .touch-only { display: block; }
+}
+
+.typebar {
+  --u: min(56px, calc((100vw - 24px) / 8.4));
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr) calc(var(--u) * 0.3) repeat(3, 1fr) calc(var(--u) * 0.3) 1fr;
+  gap: calc(var(--u) * 0.12);
+  padding: 8px max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left));
+  background: linear-gradient(#36383d, #26272b);
+  border-top: 1px solid #474a50;
+  box-shadow: 0 -8px 24px #0007;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+.typebar[hidden] { display: none; }
+.typebar .key { height: calc(var(--u) * 0.8); }
+.typebar .key.arrow { font: 600 calc(var(--u) * 0.38) / 1 system-ui, sans-serif; }
+.typebar .hide { grid-area: 1 / 9 / 3 / 10; height: auto; color: var(--muted); }
+.typebar .hide svg { width: 52%; height: auto; }
+body.typing main { padding-bottom: 140px; }

@@ -49,10 +49,13 @@
       <div class="screen-bezel">
         <canvas id="lcd" width="240" height="135" aria-label="Cardputer screen"></canvas>
         <div id="overlay" class="overlay">Starting&hellip;</div>
+        <input id="type-input" class="type-input" type="text" tabindex="-1" aria-label="Type with the system keyboard"
+          autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" inputmode="text" enterkeyhint="enter">
       </div>
       <div class="side">
         <div class="grille" aria-hidden="true"></div>
         <button id="btn-g0" class="g0" title="G0 button (not wired in this emulator)" disabled>G0</button>
+        <button id="btn-type" class="type-btn" title="Type with the system keyboard" aria-label="Type with the system keyboard"><svg viewBox="0 0 24 16" aria-hidden="true"><rect x="1" y="1" width="22" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 5h1.5M9 5h1.5M13.5 5H15M17.5 5H19M5 8.2h1.5M9 8.2h1.5M13.5 8.2H15M17.5 8.2H19M7 11.5h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
         <div class="led" id="sd-led" title="microSD activity"></div>
         <div class="brand">ADV</div>
       </div>
@@ -67,6 +70,10 @@
     <pre id="console"></pre>
   </details>
 </main>
+
+<div id="typebar" class="typebar" role="group" aria-label="Cardputer keys" hidden>
+  <button type="button" class="key special hide" aria-label="Back to the Cardputer keyboard"><svg viewBox="0 0 24 22" aria-hidden="true"><rect x="1" y="1" width="22" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 5h1.5M9 5h1.5M13.5 5H15M17.5 5H19M5 8.2h1.5M9 8.2h1.5M13.5 8.2H15M17.5 8.2H19M7 11.5h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M8.5 18l3.5 3 3.5-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+</div>
 
 <dialog id="sd-dialog" class="sd-dialog">
   <form method="dialog" class="sd-head">
@@ -112,6 +119,7 @@
     <tr><td>Backspace / Delete</td><td>del</td></tr>
     <tr><td>Enter</td><td>ok</td></tr>
   </table>
+  <p class="touch-only">On a phone or tablet, tap the screen or the keyboard button beside it to type with the system keyboard. A bar above it adds <b>esc</b>, <b>tab</b>, the modifiers and the arrow keys; its rightmost button, or putting the system keyboard away, brings back the Cardputer keyboard.</p>
 </dialog>
 
 <script type="module" src="src/main.js"></script>
