@@ -90,14 +90,14 @@ export function createTyping({ input, bar, button, keyboard, backdrop, screen, o
   }
   function place() {
     if (bar.hidden) return;
-    const height = document.documentElement.clientHeight;
     const top = vv ? vv.offsetTop : 0;
     const left = vv ? vv.offsetLeft : 0;
     const width = vv ? vv.width : document.documentElement.clientWidth;
-    const lift = Math.min(0, (vv ? top + vv.height : innerHeight) - height);
-    bar.style.transform = `translateY(${lift}px)`;
+    // Everything is placed from the top: a Home Screen app's page reaches under the status bar,
+    // so its bottom is not where the visible part ends.
+    const barTop = (vv ? top + vv.height : innerHeight) - bar.offsetHeight;
+    bar.style.transform = `translateY(${barTop}px)`;
     // The screen fills the width above the bar, or as much as fits there, sitting on the bar.
-    const barTop = height + lift - bar.offsetHeight;
     zoom(screen());
     Object.assign(backdrop.style, { left: left + 'px', top: top + 'px', width: width + 'px', height: Math.max(0, barTop - top) + 'px' });
     const inset = parseFloat(getComputedStyle(backdrop).paddingTop) || 0;     // the notch, standalone
