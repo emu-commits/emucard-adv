@@ -8,7 +8,7 @@ import { createJitHost } from '../src/jit.mjs';
 import { FatVolume, formatImage } from '../src/fat.js';
 
 const root = new URL('..', import.meta.url);
-const FW_URL = 'https://raw.githubusercontent.com/engneer-hamachan/area512/main/firmware/Area512Adv.bin';
+const FW_URL = 'https://raw.githubusercontent.com/engneer-hamachan/area512/v2.7/firmware/Area512Adv.bin';
 
 async function firmware() {
   if (process.argv[2]) return new Uint8Array(fs.readFileSync(process.argv[2]));
