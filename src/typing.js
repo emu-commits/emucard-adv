@@ -5,8 +5,11 @@
 // are handled by the page like a physical keyboard's; text that only arrives as input (Android
 // IMEs, paste, autocorrect) is typed here one character at a time, and the field never keeps
 // any of it. While the field has focus, a bar with esc, tab, the modifiers and the arrow keys
-// rides on top of the system keyboard. The Cardputer keyboard stays where it is, for when the
-// system keyboard is put away.
+// rides on top of the system keyboard, and the screen (the TERM512 one when it is showing) is
+// enlarged to fill the width of the space left above it. Touches anywhere on the bar, the
+// enlarged screen or the black around it keep the system keyboard open; only the bar's middle
+// button puts it away. The Cardputer keyboard stays where it is, for when the system keyboard
+// is put away.
 import { CODE, ARROW, codeAt, chordForChar, chordCodes } from './keymap.js';
 
 const SENTINEL = '​';    // lets Backspace reach us in an otherwise empty field
@@ -19,13 +22,13 @@ const BAR_KEYS = [
   { code: CODE.Ctrl, label: 'ctrl', name: 'Ctrl', modifier: true, area: '2 / 1' },
   { code: CODE.Opt, label: 'opt', name: 'Opt', modifier: true, area: '2 / 2' },
   { code: CODE.Alt, label: 'alt', name: 'Alt', modifier: true, area: '2 / 3' },
-  { code: ARROW.Up, with: [CODE.Fn], label: '↑', name: 'Up', cls: 'arrow', area: '1 / 6' },
-  { code: ARROW.Left, with: [CODE.Fn], label: '←', name: 'Left', cls: 'arrow', area: '2 / 5' },
-  { code: ARROW.Down, with: [CODE.Fn], label: '↓', name: 'Down', cls: 'arrow', area: '2 / 6' },
-  { code: ARROW.Right, with: [CODE.Fn], label: '→', name: 'Right', cls: 'arrow', area: '2 / 7' },
+  { code: ARROW.Up, with: [CODE.Fn], label: '↑', name: 'Up', cls: 'arrow', area: '1 / 8' },
+  { code: ARROW.Left, with: [CODE.Fn], label: '←', name: 'Left', cls: 'arrow', area: '2 / 7' },
+  { code: ARROW.Down, with: [CODE.Fn], label: '↓', name: 'Down', cls: 'arrow', area: '2 / 8' },
+  { code: ARROW.Right, with: [CODE.Fn], label: '→', name: 'Right', cls: 'arrow', area: '2 / 9' },
 ];
 
-export function createTyping({ input, bar, button, keyboard, onBlur }) {
+export function createTyping({ input, bar, button, keyboard, backdrop, screen, onBlur }) {
   keyboard.mount(bar, BAR_KEYS);
   const hide = bar.querySelector('.hide');
 
@@ -64,15 +67,45 @@ export function createTyping({ input, bar, button, keyboard, onBlur }) {
   input.addEventListener('compositionend', (ev) => { typeText(ev.data); clear(); });
   input.addEventListener('input', (ev) => { if (!ev.isComposing) clear(); });
 
-  // ---- the bar, riding on top of the system keyboard ----
+  // ---- the bar, riding on top of the system keyboard, and the screen above it ----
+  // Fixed elements are laid out in the layout viewport, which the system keyboard does not
+  // shrink; the visual viewport says where the part still showing is.
   const vv = window.visualViewport;
+  const keepFocus = (ev) => { if (document.activeElement === input) ev.preventDefault(); };
+  let zoomed = null;
+  function zoom(el) {
+    if (zoomed === el) return;
+    if (zoomed) {
+      zoomed.classList.remove('zoomed');
+      for (const p of ['left', 'top', 'width', 'height']) zoomed.style.removeProperty(p);
+      zoomed.removeEventListener('touchstart', keepFocus);
+      zoomed.removeEventListener('mousedown', keepFocus);
+    }
+    zoomed = el;
+    backdrop.hidden = !el;
+    if (!el) return;
+    el.classList.add('zoomed');
+    el.addEventListener('touchstart', keepFocus, { passive: false });
+    el.addEventListener('mousedown', keepFocus);
+  }
   function place() {
     if (bar.hidden) return;
-    const bottom = vv ? vv.offsetTop + vv.height : innerHeight;
-    bar.style.transform = `translateY(${Math.min(0, bottom - document.documentElement.clientHeight)}px)`;
+    const height = document.documentElement.clientHeight;
+    const top = vv ? vv.offsetTop : 0;
+    const left = vv ? vv.offsetLeft : 0;
+    const width = vv ? vv.width : document.documentElement.clientWidth;
+    const lift = Math.min(0, (vv ? top + vv.height : innerHeight) - height);
+    bar.style.transform = `translateY(${lift}px)`;
+    // The screen fills the width above the bar, or as much as fits there, sitting on the bar.
+    const barTop = height + lift - bar.offsetHeight;
+    zoom(screen());
+    Object.assign(backdrop.style, { left: left + 'px', top: top + 'px', width: width + 'px', height: Math.max(0, barTop - top) + 'px' });
+    const inset = parseFloat(getComputedStyle(backdrop).paddingTop) || 0;     // the notch, standalone
+    Object.assign(zoomed.style, { left: left + 'px', top: top + inset + 'px', width: width + 'px', height: Math.max(0, barTop - top - inset) + 'px' });
   }
   vv?.addEventListener('resize', place);
   vv?.addEventListener('scroll', place);
+  window.addEventListener('resize', place);
 
   input.addEventListener('focus', () => {
     clear();
@@ -82,13 +115,17 @@ export function createTyping({ input, bar, button, keyboard, onBlur }) {
   });
   input.addEventListener('blur', () => {
     bar.hidden = true;
+    zoom(null);
     document.body.classList.remove('typing');
     onBlur?.();
   });
 
   // Touches on the bar must not take focus from the field, or the system keyboard would close.
-  bar.addEventListener('touchstart', (ev) => ev.preventDefault(), { passive: false });
-  bar.addEventListener('mousedown', (ev) => ev.preventDefault());
+  // The same goes for the black around the enlarged screen.
+  for (const el of [bar, backdrop]) {
+    el.addEventListener('touchstart', (ev) => ev.preventDefault(), { passive: false });
+    el.addEventListener('mousedown', (ev) => ev.preventDefault());
+  }
   hide.addEventListener('pointerup', () => input.blur());
 
   // The keyboard button toggles the system keyboard. Focus is decided at pointerdown, before the
@@ -97,5 +134,6 @@ export function createTyping({ input, bar, button, keyboard, onBlur }) {
   button.addEventListener('pointerdown', () => { wasTyping = document.activeElement === input; });
   button.addEventListener('click', () => { if (wasTyping) input.blur(); else input.focus(); });
 
-  return { type, active: () => document.activeElement === input };
+  // place: lay out again, e.g. when the TERM512 screen appears or goes.
+  return { type, place, active: () => document.activeElement === input };
 }

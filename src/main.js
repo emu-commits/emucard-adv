@@ -243,7 +243,12 @@ function releaseAll() {
   physical.clear();
   keyboard.reset();
 }
-const typing = createTyping({ input: typeInput, bar: $('typebar'), button: $('btn-type'), keyboard, onBlur: releaseAll });
+const typing = createTyping({
+  input: typeInput, bar: $('typebar'), button: $('btn-type'), keyboard, backdrop: $('zoom-backdrop'),
+  screen: () => ($('lid').hidden ? $('lcd') : $('ext')),     // the bigger screen, while typing
+  onBlur: releaseAll,
+});
+new MutationObserver(() => typing.place()).observe($('lid'), { attributes: true, attributeFilter: ['hidden'] });
 window.addEventListener('blur', releaseAll);
 
 // ---- buttons -------------------------------------------------------------------------------
